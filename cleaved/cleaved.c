@@ -1,5 +1,5 @@
 /*
- * cleave: fork/exec daemon
+ * cleaved: fork/exec daemon
  *
  * The cleaved source code is licensed to you under a BSD 2-Clause
  * license, included below.

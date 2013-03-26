@@ -1,5 +1,5 @@
 /*
- * cleave: fork/exec daemon
+ * libcleave: fork/exec daemon client library
  *
  * The cleaved source code is licensed to you under a BSD 2-Clause
  * license, included below.
@@ -31,6 +31,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include <sys/types.h>
+#include <sys/wait.h>
+
 #ifndef CLEAVE_H
 #define CLEAVE_H
 
@@ -46,17 +49,17 @@ struct cleave_child;
  * This handle must be destroyed by calling cleave_destroy(), which will cause
  * the new daemon to exit.
  */
-cleave_handle * cleave_create();
+struct cleave_handle * cleave_create();
 
 /* Attach to a running cleave daemon at the given socket
  *
  * This handle must be destroyed by calling cleave_destroy(). The ademon will
  * continue to run after cleave_destroy().
  */
-cleave_handle * cleave_attach(char const * socket);
+struct cleave_handle * cleave_attach(char const *socket);
 
 /* Detach from the running cleave daemon. */
-void cleave_destroy(cleave_handle * handle);
+void cleave_destroy(struct cleave_handle *handle);
 
 /* Execute a child process
  *
@@ -65,14 +68,14 @@ void cleave_destroy(cleave_handle * handle);
  *
  * The returned handle *must* be freed by calling cleave_wait().
  */
-cleave_child * cleave_child(char const ** argv, int fd[3]);
+struct cleave_child * cleave_child(char const **argv, int fd[3]);
 
 /* Wait for the given child process to complete and free the handle.
  *
  * This call will deadlock if any of stdin, stdout, stderr block.
  * Returns the return code of the process. cleave_child
  */
-pid_t cleave_wait(cleave_child * child);
+pid_t cleave_wait(struct cleave_child *child);
 
 /* Execute a child process and block waiting for the child to complete.
  *
@@ -84,7 +87,7 @@ pid_t cleave_wait(cleave_child * child);
  * Returns -1 with errno set appropriately on an error, otherwise returns the
  * child process exit code.
  */
-pid_t cleave_popen(char const ** argv,
+pid_t cleave_popen(char const **argv,
 		   int (*write_stdin)(int fd),
 		   int (*read_stdout)(int fd),
 		   int (*read_stderr)(int fd),
