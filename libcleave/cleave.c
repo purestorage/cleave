@@ -155,9 +155,9 @@ struct cleave_handle * cleave_create()
 		nullfd = open("/dev/null", O_RDWR);
 		if (nullfd == -1)
 			goto child_error;
-		dup2(0, nullfd);
-		dup2(1, nullfd);
-		dup2(2, nullfd);
+		dup2(nullfd, 0);
+		dup2(nullfd, 1);
+		dup2(nullfd, 2);
 
 		/* close all open fds */
 		if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
@@ -168,7 +168,7 @@ struct cleave_handle * cleave_create()
 		}
 
 		/* geronimo */
-		execlp(daemon_path, "-n", child_port, NULL);
+		execlp(daemon_path, daemon_path, "-n", child_port, NULL);
 
 	child_error:
 		ret = snprintf(buf, sizeof(buf), "%d", errno);
@@ -210,7 +210,7 @@ struct cleave_handle * cleave_attach(char const *socket __attribute__((unused)))
 	return NULL;
 }
 
-void cleave_destroy(struct cleave_handle *handle __attribute__((unused)))
+void cleave_destroy(struct cleave_handle *handle)
 {
 	do_close(handle->sock);
 
