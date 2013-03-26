@@ -36,6 +36,7 @@
  * TODO
  * signalfd for SIGHUP
  * better logging
+ * SA_RESTART
  *...
  */
 
@@ -51,13 +52,15 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-static int epoll_add(int epollfd, int fd)
+#define verb printf
+
+static int epoll_op(int epollfd, int op, int flags, int fd)
 {
 	struct epoll_event ev;
 
-	ev.events = EPOLLIN;
+	ev.events = flags;
 	ev.data.fd = fd;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+	if (epoll_ctl(epollfd, op, fd, &ev) == -1) {
 		perror("epoll_ctl");
 		return -1;
 	}
@@ -65,20 +68,19 @@ static int epoll_add(int epollfd, int fd)
 	return 0;
 }
 
-static int set_socket_flags(int sock, int new_flags)
+static int do_fcntl(int sock, int get, int set, int add_flags, int del_flags)
 {
 	 int flags, s;
 
-	 flags = fcntl(sock, F_GETFL, 0);
+	 flags = fcntl(sock, get, 0);
 	 if (flags == -1) {
-		 perror ("fcntl");
+		 perror("fcntl");
 		 return -1;
 	 }
-
-	 flags |= new_flags;
-	 s = fcntl(sock, F_SETFL, flags);
+	 flags = (flags | add_flags) & ~del_flags;
+	 s = fcntl(sock, set, flags);
 	 if (s == -1) {
-		 perror ("fcntl");
+		 perror("fcntl");
 		 return -1;
 	 }
 
@@ -91,7 +93,7 @@ static int setup_listen_socket(char *path)
 	struct sockaddr_un local;
 	int len;
 
-	sock = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 	if (sock == -1) {
 		perror("socket");
 		return -1;
@@ -112,7 +114,6 @@ static int setup_listen_socket(char *path)
 	return 0;
 }
 
-/* Accept all incoming connections, adding them to the epollfd */
 static int accept_listen_socket(int socket, int epollfd)
 {
 	while (1) {
@@ -129,9 +130,10 @@ static int accept_listen_socket(int socket, int epollfd)
 			return -1;
 		}
 
-		if (set_socket_flags(in_fd, O_CLOEXEC | O_NONBLOCK))
+		if (do_fcntl(in_fd, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
+		    do_fcntl(in_fd, F_GETFL, F_SETFL, O_NONBLOCK, 0))
 			return -1;
-		if (epoll_add(epollfd, in_fd))
+		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, in_fd))
 			return -1;
 	}
 
@@ -141,7 +143,6 @@ static int accept_listen_socket(int socket, int epollfd)
 static int read_incoming_message(int sock __attribute__((unused)), int epollfd __attribute__((unused)))
 {
 	return 0;
-
 }
 
 static void usage(char const *prog)
@@ -161,7 +162,7 @@ int main(int argc, char *argv[])
         static int epollfd;
         struct epoll_event ev;
         char *listen_path = NULL;
-        int  socket_number = 0, accept_socket = 0, ret;
+        int  socket_number = -1, accept_socket = -1, ret;
 
         while (1) {
                 int c;
@@ -189,7 +190,7 @@ int main(int argc, char *argv[])
                 }
         }
 
-        if (!listen_path && !socket_number) {
+        if (!listen_path && socket_number == -1) {
                 usage(argv[0]);
                 return 1;
         }
@@ -200,16 +201,17 @@ int main(int argc, char *argv[])
 		return 2;
 	}
 	
-        if (socket_number) {
-		if (set_socket_flags(socket_number, O_CLOEXEC | O_NONBLOCK))
+        if (socket_number != -1) {
+		if (do_fcntl(socket_number, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
+		    do_fcntl(socket_number, F_GETFL, F_SETFL, O_NONBLOCK, 0))
 			return 3;
-		if (epoll_add(epollfd, socket_number))
+		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
 			return 4;
         } else if (listen_path) {
                 accept_socket = setup_listen_socket(listen_path);
                 if (accept_socket < 0)
                         return 5;
-		if (epoll_add(epollfd, accept_socket))
+		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, accept_socket))
 			return 6;
 	}
 
@@ -230,12 +232,23 @@ int main(int argc, char *argv[])
                         int new_socket = accept_listen_socket(accept_socket, epollfd);
                         if (new_socket < 0)
                                 return 8;
-			if (epoll_add(epollfd, socket_number))
+			verb("socket %d: connected", new_socket);
+			if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
 				return 9;
-
                 } else {
-			if (read_incoming_message(ev.data.fd, epollfd))
-				return 10;
+			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
+				verb("socket %d: closed", ev.data.fd);
+				epoll_op(epollfd, EPOLL_CTL_DEL, EPOLLIN, ev.data.fd);
+				close(ev.data.fd);
+				if (ev.data.fd == socket_number) {
+					verb("parent process closed");
+					break;
+				}
+			} else if (ev.events & EPOLLIN) {
+				verb("socket %d: incoming message", ev.data.fd);
+				if (read_incoming_message(ev.data.fd, epollfd))
+					return 10;
+			}
                 }
         }
 

@@ -50,16 +50,16 @@ struct cleave_handle {
 
 static char * const daemon_path = "cleaved";
 
-static int do_setfl(int sock, int add_flags, int del_flags)
+static int do_setfd(int sock, int add_flags, int del_flags)
 {
 	 int flags, s;
 
-	 flags = fcntl(sock, F_GETFL, 0);
+	 flags = fcntl(sock, F_GETFD, 0);
 	 if (flags == -1) {
 		 return -1;
 	 }
 	 flags = (flags | add_flags) & ~del_flags;
-	 s = fcntl(sock, F_SETFL, flags);
+	 s = fcntl(sock, F_SETFD, flags);
 	 if (s == -1) {
 		 return -1;
 	 }
@@ -128,11 +128,8 @@ struct cleave_handle * cleave_create()
 		return NULL;
 	}
 
-	/* Create the socket SOCK_CLOEXEC so that two concurrent
-	 * cleave_create() in different threads don't get each other's
-	 * sockets. We'll unset this later in the child
-	 */
-	if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sock) == -1)
+	/* all sockets/pipes are CLOEXEC in the parent */
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sock) == -1)
 		goto exit_close;
 	snprintf(child_port, sizeof(child_port), "%d", sock[1]);
 
@@ -148,7 +145,7 @@ struct cleave_handle * cleave_create()
 			goto child_error;
 		if (do_close(sock[0]) == -1)
 			goto child_error;
-		if (do_setfl(sock[1], 0, O_CLOEXEC) == -1)
+		if (do_setfd(sock[1], 0, FD_CLOEXEC) == -1)
 			goto child_error;
 
 		/* divorce child */
