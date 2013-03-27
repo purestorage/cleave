@@ -111,7 +111,7 @@ static int setup_listen_socket(char *path)
 		return -1;
 	}
 
-	return 0;
+	return sock;
 }
 
 static int accept_listen_socket(int socket, int epollfd)
@@ -131,10 +131,12 @@ static int accept_listen_socket(int socket, int epollfd)
 		}
 
 		if (do_fcntl(in_fd, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
-		    do_fcntl(in_fd, F_GETFL, F_SETFL, O_NONBLOCK, 0))
+		    do_fcntl(in_fd, F_GETFL, F_SETFL, O_NONBLOCK, 0) ||
+		    epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, in_fd)) {
+			close(in_fd);
 			return -1;
-		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, in_fd))
-			return -1;
+		}
+		verb("socket %d: connected", in_fd);
 	}
 
 	return 0;
@@ -162,7 +164,7 @@ int main(int argc, char *argv[])
         static int epollfd;
         struct epoll_event ev;
         char *listen_path = NULL;
-        int  socket_number = -1, accept_socket = -1, ret;
+        int  socket_number = -1, listen_socket = -1, ret;
 
         while (1) {
                 int c;
@@ -208,10 +210,10 @@ int main(int argc, char *argv[])
 		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
 			return 4;
         } else if (listen_path) {
-                accept_socket = setup_listen_socket(listen_path);
-                if (accept_socket < 0)
+                listen_socket = setup_listen_socket(listen_path);
+                if (listen_socket < 0)
                         return 5;
-		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, accept_socket))
+		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, listen_socket))
 			return 6;
 	}
 
@@ -228,13 +230,10 @@ int main(int argc, char *argv[])
                 if (ret == 0)
                         continue;
 
-                if (ev.data.fd == accept_socket) {
-                        int new_socket = accept_listen_socket(accept_socket, epollfd);
+                if (ev.data.fd == listen_socket) {
+                        int new_socket = accept_listen_socket(listen_socket, epollfd);
                         if (new_socket < 0)
                                 return 8;
-			verb("socket %d: connected", new_socket);
-			if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
-				return 9;
                 } else {
 			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
 				verb("socket %d: closed", ev.data.fd);
@@ -247,7 +246,7 @@ int main(int argc, char *argv[])
 			} else if (ev.events & EPOLLIN) {
 				verb("socket %d: incoming message", ev.data.fd);
 				if (read_incoming_message(ev.data.fd, epollfd))
-					return 10;
+					return 9;
 			}
                 }
         }

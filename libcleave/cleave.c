@@ -42,6 +42,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/un.h>
 
 struct cleave_handle {
 	pid_t child_pid;
@@ -117,9 +118,9 @@ again:
 
 struct cleave_handle * cleave_create()
 {
+	int err_pipe[2], sock[2], nullfd, fd, ret, last_errno;
 	struct cleave_handle *handle;
 	char child_port[10], buf[10];
-	int err_pipe[2], sock[2], nullfd, fd, ret;
 	pid_t pid;
 
 	handle = malloc(sizeof(struct cleave_handle));
@@ -191,19 +192,59 @@ struct cleave_handle * cleave_create()
 	return handle;
 
 exit_nochild:
+	last_errno = errno;
 	do_close(err_pipe[0]);
 	do_close(sock[0]);
+	errno = last_errno;
 exit_pipe:
+	last_errno = errno;
 	do_close(sock[0]);
 	do_close(sock[1]);
+	errno = last_errno;
 exit_close:
 	free(handle);
 
 	return NULL;
 }
 
-struct cleave_handle * cleave_attach(char const *socket __attribute__((unused)))
+struct cleave_handle * cleave_attach(char const *path)
 {
+	struct cleave_handle *handle;
+	struct sockaddr_un remote;
+	int sock, len, last_errno;
+
+	if (strlen(path) >= sizeof(remote.sun_path)) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	handle = malloc(sizeof(struct cleave_handle));
+	if (!handle) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sock == -1)
+		goto exit_socket;
+
+	remote.sun_family = AF_UNIX;
+	strcpy(remote.sun_path, path);
+	len = strlen(remote.sun_path) + sizeof(remote.sun_family);
+	if (connect(sock, (struct sockaddr *)&remote, len) == -1)
+		goto exit_connect;
+
+	handle->sock = sock;
+	handle->child_pid = 0;
+	return handle;
+
+exit_connect:
+	last_errno = errno;
+	do_close(sock);
+	errno = last_errno;
+exit_socket:
+	free(handle);
+
 	return NULL;
 }
 
