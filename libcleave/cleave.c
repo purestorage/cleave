@@ -177,12 +177,16 @@ struct cleave_handle * cleave_create()
 	/* parent */
 	do_close(err_pipe[1]);
 	do_close(sock[1]);
+	sock[1] = -1;
 
 	/* check if the child forked properly */
 	ret = do_read(err_pipe[0], buf, sizeof(buf));
 	if (ret) {
 		errno = atoi(buf);
-		goto exit_nochild;
+		do_close(err_pipe[0]);
+		do_close(sock[0]);
+		free(handle);
+		return NULL;
 	}
 	do_close(err_pipe[0]);
 
@@ -191,11 +195,6 @@ struct cleave_handle * cleave_create()
 
 	return handle;
 
-exit_nochild:
-	last_errno = errno;
-	do_close(err_pipe[0]);
-	do_close(sock[0]);
-	errno = last_errno;
 exit_pipe:
 	last_errno = errno;
 	do_close(sock[0]);

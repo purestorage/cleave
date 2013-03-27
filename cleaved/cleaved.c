@@ -204,7 +204,7 @@ int main(int argc, char *argv[])
 	}
 	
         if (socket_number != -1) {
-		if (do_fcntl(socket_number, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
+		if (do_fcntl(socket_number, F_GETFD, F_SETFD, FD_CLOEXEC, 0) ||
 		    do_fcntl(socket_number, F_GETFL, F_SETFL, O_NONBLOCK, 0))
 			return 3;
 		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
