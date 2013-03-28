@@ -31,22 +31,29 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include <cleave.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <assert.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/un.h>
+#include <cleave.h>
+#include "syscall.h"
 
 struct cleave_handle {
 	pid_t child_pid;
 	int sock;
+};
+
+struct cleave_child {
+	int wait_pipe;
 };
 
 static char * const daemon_path = "cleaved";
@@ -68,52 +75,71 @@ static int do_setfd(int sock, int add_flags, int del_flags)
 	 return 0;
 }
 
-static int do_close(int sock)
+static char to_hex(unsigned char v)
 {
-	int ret;
-again:
-	ret = close(sock);
-	if (ret == -1 && errno == EINTR)
-		goto again;
-	return ret;
+	static char result[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
+	assert(v < sizeof(result));
+	return result[v];
 }
 
-static int do_write(int fd, const void * buf, size_t size)
+static char *urlencode(char const *str)
 {
-	size_t pos;
-	int ret;
+	char *ret, *pret;
+	const char *pstr;
 
-	for (pos = 0; pos < size; ++pos) {
-		ret = write(fd, buf + pos, size - pos);
-		if (ret == -1 && errno != EINTR)
-			return -1;
-		else if (ret >= 0)
-			pos += ret;
+	ret = pret = malloc(strlen(str) * 3 + 1);
+	if (!ret) {
+		errno = ENOMEM;
+		return NULL;
 	}
 
-	return size;
-}
-
-static int do_read(int fd, void *buf, size_t size)
-{
-	int ret;
-
-again:
-	ret = read(fd, buf, size);
-	if (ret == -1 && errno == EINTR)
-		goto again;
+	for (pstr = str; *pstr; ++pstr) {
+		if (isalnum(*pstr) || *pstr == '-' || *pstr == '_' || *pstr == '.' || *pstr == '~')
+			*pret++ = *pstr;
+		else if (*pstr == ' ')
+			*pret++ = '+';
+		else
+			*pret++ = '%', *pret++ = to_hex(*pstr >> 4), *pret++ = to_hex(*pstr & 15);
+		pret++;
+	}
+	*pret = '\0';
 	return ret;
 }
 
-static int do_waitpid(pid_t pid, int *status)
+/* Encode argv as a string of the form:
+ *  arg=urlencode(argv[0])
+ *  arg=urlencode(argv[1])
+ */
+static char *encodeargs(char const **argv)
 {
-	int ret;
+	char const *arg;
+	char *buf = NULL, *p = NULL, *uarg, *name;
+	int len;
 
-again:
-	ret = waitpid(pid, status, 0);
-	if (ret == -1 && errno == EINTR)
-		goto again;
-	return ret;
+	len = 0;
+	for (arg = *argv; *arg; ++arg)
+		len += 7 + strlen(arg) * 3;
+	buf = malloc(len);
+	if (!buf) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	p = buf;
+	name = "exec";
+	for (arg = *argv; *arg; ++arg) {
+		uarg = urlencode(arg);
+		if (!uarg) {
+			free(buf);
+			errno = ENOMEM;
+			return NULL;
+		}
+		p += sprintf(p, "%s=%s\n", name, uarg);
+		name = "arg";
+		free(uarg);
+	}
+
+	return buf;
 }
 
 struct cleave_handle * cleave_create()
@@ -156,6 +182,7 @@ struct cleave_handle * cleave_create()
 		dup2(nullfd, 0);
 		dup2(nullfd, 1);
 		dup2(nullfd, 2);
+		do_close(nullfd);
 
 		/* close all open fds */
 		if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
@@ -253,19 +280,134 @@ void cleave_destroy(struct cleave_handle *handle)
 
 	if (handle->child_pid) {
 		int status;
-		do_waitpid(handle->child_pid, &status);
+		do_waitpid(handle->child_pid, &status, 0);
 	}
 
 	free(handle);
 }
 
-struct cleave_child * cleave_child(char const **argv __attribute__((unused)), int fd[3] __attribute__((unused)))
+struct cleave_child *cleave_child(struct cleave_handle *handle, char const **argv, int in_fd[3])
 {
+	int fd[4], exit_pipe[2], nullfd = -1, i, ret;
+	struct cleave_child * child;
+	char *encoded_args;
+	struct iovec data;
+	struct msghdr hdr;
+	char cmsgbuf[CMSG_SPACE(sizeof(fd))];
+	struct cmsghdr *cmsg;
+
+	child = malloc(sizeof(*child));
+	if (!child) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	encoded_args = encodeargs(argv);
+	if (!encoded_args) {
+		errno = ENOMEM;
+		goto exit_encode;
+	}
+
+	/* We use a pipe to wait for the process to terminate */
+	if (pipe2(exit_pipe, O_CLOEXEC) == -1)
+		goto exit_pipe;
+
+	/* We can't pass invalid file descriptors over the socket,
+	 * so pass fds to null instead */
+	memcpy(fd, in_fd, sizeof(in_fd));
+	if (in_fd[0] == -1 || in_fd[1] == -1 || in_fd[2] == -1) {
+		nullfd = open("/dev/null", O_RDWR);
+		if (nullfd == -1)
+			goto exit_nullfd;
+		for (i = 0; i < 3; i++) {
+			if (fd[i] == -1)
+				fd[i] = nullfd;
+		}
+	}
+	fd[3] = exit_pipe[1];
+
+	data.iov_base = encoded_args;
+	data.iov_len = strlen(encoded_args) + 1;
+
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.msg_name = NULL;
+	hdr.msg_namelen = 0;
+	hdr.msg_iov = &data;
+	hdr.msg_iovlen = 1;
+	hdr.msg_flags = 0;
+
+	hdr.msg_control = cmsgbuf;
+	hdr.msg_controllen = CMSG_LEN(sizeof(fd));
+
+	cmsg = CMSG_FIRSTHDR(&hdr);
+	cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	memcpy(CMSG_DATA(cmsg), fd, sizeof(fd));
+
+	ret = sendmsg(handle->sock, &hdr, 0);
+	if (ret == -1)
+		goto exit_sendmsg;
+
+	if (nullfd != -1)
+		do_close(nullfd);
+	do_close(exit_pipe[1]);
+	free(encoded_args);
+
+	child->wait_pipe = exit_pipe[0];
+	return child;
+
+exit_sendmsg:
+	if (nullfd != -1)
+		close(nullfd);
+exit_nullfd:
+	do_close(exit_pipe[0]);
+	do_close(exit_pipe[1]);
+exit_pipe:
+	free(encoded_args);
+exit_encode:
+	free(child);
+
 	return NULL;
 }
 
-pid_t cleave_wait(struct cleave_child *child __attribute__((unused)))
+int cleave_wait_fd(struct cleave_child *child)
 {
+	return dup(child->wait_pipe);
+}
+
+pid_t cleave_wait(struct cleave_child *child)
+{
+	char buf[16], *p = buf;
+	int len, ret;
+
+	/* Just block waiting for output from cleave_child */
+	for (;;) {
+		len = buf + sizeof(buf) - p - 1;
+		if (len == 0) {
+			errno = EINVAL;
+			ret = -1;
+			break;
+		}
+		ret = do_read(child->wait_pipe, p, len);
+		if (ret == -1)
+			break;
+		else if (ret == 0) {
+			if (buf != p) {
+				*p = '\0';
+				ret = atoi(buf);
+			} else {
+				errno = EINVAL;
+				ret = -1;
+			}
+		} else {
+			p += ret;
+		}
+	}
+
+	do_close(child->wait_pipe);
+	free(child);
+
 	return 0;
 }
 

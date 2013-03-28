@@ -8,8 +8,8 @@ test:
 cleaved/cleaved: cleaved/cleaved.c
 	gcc ${CFLAGS} -o $@ $<
 
-libcleave/libcleave.so: libcleave/cleave.c cleaved/cleaved
-	gcc -fPIC ${CFLAGS} -Ilibcleave/ -shared -Wl,-soname,libcleave.so -o $@ $<
+libcleave/libcleave.so: libcleave/cleave.c libcleave/syscall.c
+	gcc -fPIC ${CFLAGS} -Ilibcleave/ -shared -Wl,-soname,libcleave.so -o $@ $^
 
 test/test: test/test.c libcleave/libcleave.so
 	gcc ${CFLAGS} -Ilibcleave -Llibcleave -o $@ $< -lcleave

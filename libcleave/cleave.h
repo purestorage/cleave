@@ -31,9 +31,6 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-#include <sys/types.h>
-#include <sys/wait.h>
-
 #ifndef CLEAVE_H
 #define CLEAVE_H
 
@@ -68,14 +65,25 @@ void cleave_destroy(struct cleave_handle *handle);
  *
  * The returned handle *must* be freed by calling cleave_wait().
  */
-struct cleave_child * cleave_child(char const **argv, int fd[3]);
+struct cleave_child * cleave_child(struct cleave_handle *handle,
+				   char const **argv, int fd[3]);
 
 /* Wait for the given child process to complete and free the handle.
  *
- * This call will deadlock if any of stdin, stdout, stderr block.
- * Returns the return code of the process. cleave_child
+ * This call will deadlock if any of stdin, stdout, stderr fill and
+ * aren't drained by the client.
+ *
+ * Returns the return code of the process, or -1.
+ * The cleave_child is always invalid after this call, even if -1 is returned.
  */
 pid_t cleave_wait(struct cleave_child *child);
+
+/* Return a file descriptor that can be used in select/poll/epoll to determine
+ * when to call cleave_wait(). It is the callers responsibility to close this
+ * file descriptor once cleave_wait returns. Do *not* read/write to this file
+ * descriptor.
+ */
+int cleave_wait_fd(struct cleave_child *child);
 
 /* Execute a child process and block waiting for the child to complete.
  *
