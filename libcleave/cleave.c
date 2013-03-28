@@ -82,16 +82,10 @@ static char to_hex(unsigned char v)
 	return result[v];
 }
 
-static char *urlencode(char const *str)
+static int urlencode(char const *str, char *ret)
 {
-	char *ret, *pret;
+	char *pret = ret;
 	const char *pstr;
-
-	ret = pret = malloc(strlen(str) * 3 + 1);
-	if (!ret) {
-		errno = ENOMEM;
-		return NULL;
-	}
 
 	for (pstr = str; *pstr; ++pstr) {
 		if (isalnum(*pstr) || *pstr == '-' || *pstr == '_' || *pstr == '.' || *pstr == '~')
@@ -103,41 +97,42 @@ static char *urlencode(char const *str)
 		pret++;
 	}
 	*pret = '\0';
-	return ret;
+	return pret - ret;
+}
+
+static int urlencode_len(int length)
+{
+	return (length * 3 + 1);
 }
 
 /* Encode argv as a string of the form:
- *  arg=urlencode(argv[0])
- *  arg=urlencode(argv[1])
+ *  exec=urlencode(argv[0]),urlencode(argv[1]),urlencode(argv[2])\n
  */
 static char *encodeargs(char const **argv)
 {
-	char const *arg;
-	char *buf = NULL, *p = NULL, *uarg, *name;
+	char const **arg;
+	char *buf = NULL, *p = NULL;
 	int len;
 
-	len = 0;
-	for (arg = *argv; *arg; ++arg)
-		len += 7 + strlen(arg) * 3;
+	len = 7;
+	for (arg = argv; *arg; ++arg)
+		len += 1 + urlencode_len(strlen(*arg));
 	buf = malloc(len);
 	if (!buf) {
 		errno = ENOMEM;
 		return NULL;
 	}
 
-	p = buf;
-	name = "exec";
-	for (arg = *argv; *arg; ++arg) {
-		uarg = urlencode(arg);
-		if (!uarg) {
-			free(buf);
-			errno = ENOMEM;
-			return NULL;
+	strcpy(buf, "exec=");
+	p = buf + strlen(buf);
+	for (arg = argv; *arg; ++arg) {
+		p += urlencode(*arg, p);
+		if (arg[1]) {
+			*p++ = ',';
 		}
-		p += sprintf(p, "%s=%s\n", name, uarg);
-		name = "arg";
-		free(uarg);
 	}
+	*p++ = '\n';
+	*p++ = '\0';
 
 	return buf;
 }

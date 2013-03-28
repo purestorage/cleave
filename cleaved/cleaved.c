@@ -34,7 +34,7 @@
 
 /**
  * TODO
- * signalfd for SIGHUP
+ * signalfd for SIGHUP and SIGCHILD
  * better logging
  * SA_RESTART
  *...
@@ -47,12 +47,30 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <assert.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#define verb printf
+struct child_proc {
+	struct child_proc *next;
+	char **argv;
+	int fd[3];
+	int exit_pipe;
+	pid_t pid;
+};
+
+static char *readbuf;
+static size_t readbuf_len;
+
+#define verb(...) fprintf(stderr, __VA_ARGS__)
+
+static void  __attribute__((noreturn)) out_of_memory()
+{
+	verb("out of memory");
+	abort();
+}
 
 static int epoll_op(int epollfd, int op, int flags, int fd)
 {
@@ -142,9 +160,183 @@ static int accept_listen_socket(int socket, int epollfd)
 	return 0;
 }
 
-static int read_incoming_message(int sock __attribute__((unused)), int epollfd __attribute__((unused)))
+static char from_hex(unsigned char v)
 {
+	if (v >= 'A' && v <= 'F')
+		return 10 + (v - 'A');
+	else if (v >= '0' && v <= '9')
+		return 0 + (v - '0');
+	else
+		return 0;
+}
+
+static int urldecode(char const *str, char *ret)
+{
+	char const *pstr = str;
+	char *pret = ret;
+
+	while (*pstr) {
+		if (*pstr == '%') {
+			if (pstr[1] && pstr[2]) {
+				*pret++ = from_hex(pstr[1]) << 4 | from_hex(pstr[2]);
+				pstr += 2;
+			}
+		} else if (*pstr == '+') {
+			*pret++ = ' ';
+		} else {
+			*pret++ = *pstr;
+		}
+		pstr++;
+	}
+	*pret = '\0';
+	return pret - ret;
+}
+
+/* Message consists of
+ *   exec=urlencode(argv[0]),urlencode(argv[1]),urlencode(argv[2])\n
+ */
+static int decode_message(struct child_proc *child, char *buf)
+{
+	int argcount, size;
+	char **argv, *pbuf, *argbuf;
+
+	if (strncmp(buf, "exec=", 5)) {
+		verb("unknown message type");
+		return -1;
+	}
+
+	/* Count the number of arguments in first line */
+	for (pbuf = buf, argcount = 0; *pbuf; pbuf++) {
+		if (*pbuf == ',')
+			++argcount;
+		else if (*pbuf == '\n')
+			break;
+	}
+	size = pbuf - buf;
+
+	argv = malloc(sizeof(char *) * (argcount + 1));
+	if (!argv)
+		out_of_memory();
+
+	/* Allocate a single buffer for all of the decoded strings, which
+	 * is guaranteed to be less than the number of bytes above */
+	argbuf = malloc(size);
+	if (!argbuf)
+		out_of_memory();
+
+	/* Start decoding the mesage */
+	for (pbuf = buf, argcount = 0; *pbuf; pbuf++) {
+		if (*pbuf == ',' || *pbuf == '\n') {
+			*pbuf = '\0';
+			argv[argcount++] = argbuf;
+			/* Include the NUL between each decoded argument */
+			argbuf += urldecode(buf, argbuf) + 1;
+			buf = pbuf + 1;
+		}
+	}
+	argv[argcount] = '\0';
+
+	child->argv = argv;
 	return 0;
+}
+
+/* Read the incoming message into read_buf [preallocated to the maximum
+ * size], and the associated file descriptors. There are four file descriptors,
+ * fd[0..3] which we'll connect directly to the child, and fd[3] which we'll
+ * use to communicate the exit code back to the client.
+ */
+static struct child_proc *read_incoming_message(int sock)
+{
+	struct child_proc *child;
+	int fd[4], in_fd, ret;
+	size_t nfd = 0;
+	char cmsgbuf[CMSG_SPACE(sizeof(fd))];
+	struct iovec data;
+	struct msghdr hdr;
+	struct cmsghdr *cmsg;
+
+	child = malloc(sizeof(struct child_proc));
+	if (!child)
+		out_of_memory();
+	memset(child, 0, sizeof(*child));
+
+	data.iov_base = readbuf;
+	data.iov_len = readbuf_len;
+
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.msg_iov = &data;
+	hdr.msg_iovlen = 1;
+	hdr.msg_name = NULL;
+	hdr.msg_namelen = 0;
+	hdr.msg_flags = 0;
+
+	hdr.msg_control = cmsgbuf;
+	hdr.msg_controllen = CMSG_LEN(sizeof(fd));
+
+	ret = recvmsg(sock, &hdr, MSG_CMSG_CLOEXEC);
+	if (ret == -1) {
+		perror("recvmsg");
+		goto exit_recvmsg;
+	}
+
+	if (hdr.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) {
+		verb("recvmsg truncated");
+		goto exit_truncated;
+	}
+
+	for (cmsg = CMSG_FIRSTHDR(&hdr); cmsg != NULL; cmsg = CMSG_NXTHDR(&hdr, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET &&
+		    cmsg->cmsg_type == SCM_RIGHTS) {
+			memcpy(&in_fd, (int *)CMSG_DATA(cmsg), sizeof(in_fd));
+			if (nfd < sizeof(fd) / sizeof(fd[0])) {
+				fd[nfd++] = in_fd;
+			} else {
+				close(in_fd);
+			}
+		}
+	}
+
+	if (nfd != 4) {
+		verb("incorrect number of file descriptors");
+		goto exit_wrongfd;
+	}
+
+	if (decode_message(child, readbuf) == -1)
+		goto exit_decode;
+
+	memcpy(child->fd, fd, sizeof(child->fd));
+	child->exit_pipe = fd[3];
+	return child;
+
+exit_decode:
+exit_wrongfd:
+	while (nfd > 0) {
+		close(fd[--nfd]);
+	}
+exit_truncated:
+exit_recvmsg:
+	free(child);
+
+	return NULL;
+}
+
+/* Destroy a struct child_proc created by read_incoming_message */
+static void destroy_child(struct child_proc *child)
+{
+	size_t i;
+
+	assert(!child->next);
+	if (child->argv) {
+		free(child->argv[0]);
+		free(child->argv);
+	}
+	for (i = 0; i < sizeof(child->fd) / sizeof(child->fd[0]); i++) {
+		if (child->fd[i] != -1)
+			close(child->fd[i]);
+	}
+	if (child->exit_pipe != -1)
+		close(child->exit_pipe);
+	free(child);
 }
 
 static void usage(char const *prog)
@@ -165,6 +357,7 @@ int main(int argc, char *argv[])
         struct epoll_event ev;
         char *listen_path = NULL;
         int  socket_number = -1, listen_socket = -1, ret;
+	struct child_proc *child;
 
         while (1) {
                 int c;
@@ -196,6 +389,16 @@ int main(int argc, char *argv[])
                 usage(argv[0]);
                 return 1;
         }
+
+	/* read_incoming_message receives a message containing an array of
+	 * urlencoded arguments:
+	 *   arg=%5D\n
+	 * The worst case size is one url encoded byte per argument
+	 */
+	readbuf_len = sysconf(_SC_ARG_MAX) * 8 + 20;
+	readbuf = malloc(readbuf_len);
+	if (!readbuf)
+		out_of_memory();
 
 	epollfd = epoll_create(1);
 	if (epollfd < 0) {
@@ -233,7 +436,7 @@ int main(int argc, char *argv[])
                 if (ev.data.fd == listen_socket) {
                         int new_socket = accept_listen_socket(listen_socket, epollfd);
                         if (new_socket < 0)
-                                return 8;
+				return 8;
                 } else {
 			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
 				verb("socket %d: closed", ev.data.fd);
@@ -245,8 +448,13 @@ int main(int argc, char *argv[])
 				}
 			} else if (ev.events & EPOLLIN) {
 				verb("socket %d: incoming message", ev.data.fd);
-				if (read_incoming_message(ev.data.fd, epollfd))
-					return 9;
+				child = read_incoming_message(ev.data.fd);
+				if (!child)
+					continue;
+
+				/* XXX: start the child */
+
+				destroy_child(child);
 			}
                 }
         }
