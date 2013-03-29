@@ -204,13 +204,16 @@ static int decode_message(struct child_proc *child, char *buf)
 		verb("unknown message type\n");
 		return -1;
 	}
+	buf += 5;
 
 	/* Count the number of arguments in first line */
 	for (pbuf = buf, argcount = 0; *pbuf; pbuf++) {
 		if (*pbuf == ',')
 			++argcount;
-		else if (*pbuf == '\n')
+		else if (*pbuf == '\n') {
+			++argcount;
 			break;
+		}
 	}
 	size = pbuf - buf;
 
@@ -234,7 +237,7 @@ static int decode_message(struct child_proc *child, char *buf)
 			buf = pbuf + 1;
 		}
 	}
-	argv[argcount] = '\0';
+	argv[argcount] = NULL;
 
 	child->argv = argv;
 	return 0;

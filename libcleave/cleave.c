@@ -30,6 +30,8 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * TODO: logging from this library.
  */
 #include <unistd.h>
 #include <fcntl.h>
@@ -92,9 +94,11 @@ static int urlencode(char const *str, char *ret)
 			*pret++ = *pstr;
 		else if (*pstr == ' ')
 			*pret++ = '+';
-		else
-			*pret++ = '%', *pret++ = to_hex(*pstr >> 4), *pret++ = to_hex(*pstr & 15);
-		pret++;
+		else {
+			*pret++ = '%';
+			*pret++ = to_hex(*pstr >> 4);
+			*pret++ = to_hex(*pstr & 15);
+		}
 	}
 	*pret = '\0';
 	return pret - ret;
@@ -175,7 +179,7 @@ struct cleave_handle * cleave_create(int error_fd)
 		if (dup2(nullfd, 0) == -1 ||
 		    dup2(nullfd, 1) == -1 ||
 		    dup2(error_fd != -1 ? error_fd : nullfd, 2) == -1 ||
-		    do_close(nullfd))
+		    do_close(nullfd) == -1)
 			goto child_error;
 
 		/* close all open fds */
@@ -333,6 +337,7 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 	hdr.msg_control = cmsgbuf;
 	hdr.msg_controllen = CMSG_LEN(sizeof(fd));
 
+	memset(cmsgbuf, 0, sizeof(cmsgbuf));
 	cmsg = CMSG_FIRSTHDR(&hdr);
 	cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
 	cmsg->cmsg_level = SOL_SOCKET;
