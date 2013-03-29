@@ -45,8 +45,11 @@ struct cleave_child;
  *
  * This handle must be destroyed by calling cleave_destroy(), which will cause
  * the new daemon to exit.
+ *
+ * The passed error_fd is connected to stderr of the child process. Specify
+ * -1 if you don't want to see any errors.
  */
-struct cleave_handle * cleave_create();
+struct cleave_handle * cleave_create(int error_fd);
 
 /* Attach to a running cleave daemon at the given socket
  *

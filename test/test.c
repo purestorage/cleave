@@ -8,7 +8,7 @@ int main()
 	struct cleave_handle *handle;
 	struct cleave_child *child;
 
-	handle = cleave_create();
+	handle = cleave_create(2);
 	assert(handle);
 
 	{

@@ -34,7 +34,7 @@
 
 /**
  * TODO
- * signalfd for SIGHUP and SIGCHILD
+ * signalfd for SIGHUP and SIGCHILD, process notification
  * better logging
  * SA_RESTART
  *...
@@ -154,7 +154,7 @@ static int accept_listen_socket(int socket, int epollfd)
 			close(in_fd);
 			return -1;
 		}
-		verb("socket %d: connected", in_fd);
+		verb("socket %d: connected\n", in_fd);
 	}
 
 	return 0;
@@ -201,7 +201,7 @@ static int decode_message(struct child_proc *child, char *buf)
 	char **argv, *pbuf, *argbuf;
 
 	if (strncmp(buf, "exec=", 5)) {
-		verb("unknown message type");
+		verb("unknown message type\n");
 		return -1;
 	}
 
@@ -248,8 +248,8 @@ static int decode_message(struct child_proc *child, char *buf)
 static struct child_proc *read_incoming_message(int sock)
 {
 	struct child_proc *child;
-	int fd[4], in_fd, ret;
-	size_t nfd = 0;
+	int fd[4], ret;
+	size_t nfd = 0, i;
 	char cmsgbuf[CMSG_SPACE(sizeof(fd))];
 	struct iovec data;
 	struct msghdr hdr;
@@ -280,44 +280,44 @@ static struct child_proc *read_incoming_message(int sock)
 	}
 
 	if (hdr.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) {
-		verb("recvmsg truncated");
-		goto exit_truncated;
+		verb("recvmsg truncated\n");
+		goto exit_recvmsg;
 	}
 
-	for (cmsg = CMSG_FIRSTHDR(&hdr); cmsg != NULL; cmsg = CMSG_NXTHDR(&hdr, cmsg)) {
-		if (cmsg->cmsg_level == SOL_SOCKET &&
-		    cmsg->cmsg_type == SCM_RIGHTS) {
-			memcpy(&in_fd, (int *)CMSG_DATA(cmsg), sizeof(in_fd));
-			if (nfd < sizeof(fd) / sizeof(fd[0])) {
-				fd[nfd++] = in_fd;
-			} else {
-				close(in_fd);
-			}
-		}
-	}
-
+	cmsg = CMSG_FIRSTHDR(&hdr);
+	nfd = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(fd[0]);
 	if (nfd != 4) {
-		verb("incorrect number of file descriptors");
-		goto exit_wrongfd;
+		verb("incorrect number of file descriptors %d\n", (int)nfd);
+		goto exit_recvmsg;
 	}
 
 	if (decode_message(child, readbuf) == -1)
-		goto exit_decode;
+		goto exit_recvmsg;
 
+	memcpy(fd, CMSG_DATA(cmsg), sizeof(fd));
 	memcpy(child->fd, fd, sizeof(child->fd));
 	child->exit_pipe = fd[3];
+
+	/* If the client gave us more file descriptors, close them */
+	cmsg = CMSG_NXTHDR(&hdr, cmsg);
+close_fds:
+	while (cmsg != NULL) {
+		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+			nfd = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(fd[0]);
+			memcpy(fd, CMSG_DATA(cmsg), sizeof(fd));
+			for (i = 0; i < nfd; i++)
+				close(fd[i]);
+		}
+		cmsg = CMSG_NXTHDR(&hdr, cmsg);
+	}
 	return child;
 
-exit_decode:
-exit_wrongfd:
-	while (nfd > 0) {
-		close(fd[--nfd]);
-	}
-exit_truncated:
 exit_recvmsg:
+	/* Close all of the file descriptors we received */
+	cmsg = CMSG_FIRSTHDR(&hdr);
 	free(child);
-
-	return NULL;
+	child = NULL;
+	goto close_fds;
 }
 
 /* Destroy a struct child_proc created by read_incoming_message */
@@ -339,6 +339,58 @@ static void destroy_child(struct child_proc *child)
 	free(child);
 }
 
+static int start_child(struct child_proc *child __attribute__((unused)))
+{
+	int err_pipe[2], ret;
+	pid_t pid;
+	char buf[10];
+
+	if (pipe2(err_pipe, O_CLOEXEC) == -1) {
+		perror("pipe2");
+		return -1;
+	}
+
+	pid = fork();
+	if (!pid) {
+		/* child */
+		if (close(err_pipe[0]) == -1)
+			goto child_error;
+
+		if (dup2(child->fd[0], 0) == -1 ||
+		    dup2(child->fd[1], 1) == -1 ||
+		    dup2(child->fd[2], 2) == -1)
+			goto child_error;
+
+		close(child->fd[0]);
+		close(child->fd[1]);
+		close(child->fd[2]);
+
+		execvp(child->argv[0], child->argv);
+	child_error:
+		ret = snprintf(buf, sizeof(buf), "%d", errno);
+		ret = write(err_pipe[1], buf, ret);
+		_exit(127);
+	}
+
+	/* parent */
+	close(err_pipe[1]);
+	close(child->fd[0]);
+	close(child->fd[1]);
+	close(child->fd[2]);
+	child->fd[0] = child->fd[1] = child->fd[2] = -1;
+
+	/* check if the child forked properly */
+	ret = read(err_pipe[0], buf, sizeof(buf));
+	if (ret) {
+		close(err_pipe[0]);
+		errno = atoi(buf);
+		return -1;
+	}
+	close(err_pipe[0]);
+	return 0;
+}
+
+
 static void usage(char const *prog)
 {
         printf("Usage:\n");
@@ -353,42 +405,42 @@ static void usage(char const *prog)
 
 int main(int argc, char *argv[])
 {
-        static int epollfd;
-        struct epoll_event ev;
-        char *listen_path = NULL;
-        int  socket_number = -1, listen_socket = -1, ret;
-	struct child_proc *child;
+	static int epollfd;
+	struct epoll_event ev;
+	char *listen_path = NULL;
+	int  socket_number = -1, listen_socket = -1, ret;
+	struct child_proc *child, *children = NULL;
 
-        while (1) {
-                int c;
+	while (1) {
+		int c;
 
-                static struct option long_options[] = {
-                        { .name = "listen",     .has_arg = 1,   .val = 'l' },
-                        { .name = "number",     .has_arg = 1,   .val = 'n' },
-                        { .name = "help",       .has_arg = 0,   .val = 'h' },
-                };
+		static struct option long_options[] = {
+			{ .name = "listen",     .has_arg = 1,   .val = 'l' },
+			{ .name = "number",     .has_arg = 1,   .val = 'n' },
+			{ .name = "help",       .has_arg = 0,   .val = 'h' },
+		};
 
-                c = getopt_long(argc, argv, "l:n:h", long_options, NULL);
-                if (c == -1)
+		c = getopt_long(argc, argv, "l:n:h", long_options, NULL);
+		if (c == -1)
+			break;
+
+		switch (c) {
+		case 'l':
+			listen_path = strdupa(optarg);
                         break;
-
-                switch (c) {
-                case 'l':
-                        listen_path = strdupa(optarg);
+		case 'n':
+			socket_number = atoi(optarg);
                         break;
-                case 'n':
-                        socket_number = atoi(optarg);
-                        break;
-                case 'h':
-                        usage(argv[0]);
-                        return 0;
-                }
-        }
+		case 'h':
+			usage(argv[0]);
+			return 0;
+		}
+	}
 
-        if (!listen_path && socket_number == -1) {
-                usage(argv[0]);
-                return 1;
-        }
+	if (!listen_path && socket_number == -1) {
+		usage(argv[0]);
+		return 1;
+	}
 
 	/* read_incoming_message receives a message containing an array of
 	 * urlencoded arguments:
@@ -439,25 +491,31 @@ int main(int argc, char *argv[])
 				return 8;
                 } else {
 			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
-				verb("socket %d: closed", ev.data.fd);
+				verb("socket %d: closed\n", ev.data.fd);
 				epoll_op(epollfd, EPOLL_CTL_DEL, EPOLLIN, ev.data.fd);
 				close(ev.data.fd);
 				if (ev.data.fd == socket_number) {
-					verb("parent process closed");
+					verb("parent process closed\n");
 					break;
 				}
 			} else if (ev.events & EPOLLIN) {
-				verb("socket %d: incoming message", ev.data.fd);
+				verb("socket %d: incoming message\n", ev.data.fd);
 				child = read_incoming_message(ev.data.fd);
 				if (!child)
 					continue;
 
-				/* XXX: start the child */
+				if (start_child(child) == -1) {
+					verb("unable to start %s\n", child->argv[0]);
+					destroy_child(child);
+					continue;
+				}
 
-				destroy_child(child);
+				/* add the child to the list of children */
+				child->next = children;
+				children = child;
 			}
-                }
-        }
+		}
+	}
 
         return 0;
 }

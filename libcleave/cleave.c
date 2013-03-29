@@ -137,7 +137,7 @@ static char *encodeargs(char const **argv)
 	return buf;
 }
 
-struct cleave_handle * cleave_create()
+struct cleave_handle * cleave_create(int error_fd)
 {
 	int err_pipe[2], sock[2], nullfd, fd, ret, last_errno;
 	struct cleave_handle *handle;
@@ -163,21 +163,20 @@ struct cleave_handle * cleave_create()
 		/* child */
 		struct rlimit rlim;
 
-		if (do_close(err_pipe[0]) == -1)
-			goto child_error;
-		if (do_close(sock[0]) == -1)
-			goto child_error;
-		if (do_setfd(sock[1], 0, FD_CLOEXEC) == -1)
+		if (do_close(err_pipe[0]) == -1 ||
+		    do_close(sock[0]) == -1 ||
+		    do_setfd(sock[1], 0, FD_CLOEXEC) == -1)
 			goto child_error;
 
 		/* divorce child */
 		nullfd = open("/dev/null", O_RDWR);
 		if (nullfd == -1)
 			goto child_error;
-		dup2(nullfd, 0);
-		dup2(nullfd, 1);
-		dup2(nullfd, 2);
-		do_close(nullfd);
+		if (dup2(nullfd, 0) == -1 ||
+		    dup2(nullfd, 1) == -1 ||
+		    dup2(error_fd != -1 ? error_fd : nullfd, 2) == -1 ||
+		    do_close(nullfd))
+			goto child_error;
 
 		/* close all open fds */
 		if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
