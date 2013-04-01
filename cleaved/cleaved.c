@@ -123,7 +123,7 @@ cleaved_log_dbg(const char *format, ...)
 		return;
 
 	va_start(args, format);
-	cleaved_log(format, "MSG", args);
+	cleaved_log(format, "DBG", args);
 	va_end(args);
 }
 
@@ -231,6 +231,22 @@ static int do_fcntl(int sock, int get, int set, int add_flags, int del_flags)
 	 }
 
 	 return 0;
+}
+
+static ssize_t do_write(int fd, const void * buf, size_t size)
+{
+	size_t pos;
+	int ret;
+
+	for (pos = 0; pos < size; ++pos) {
+		ret = write(fd, buf + pos, size - pos);
+		if (ret == -1 && errno != EINTR)
+			return -1;
+		else if (ret >= 0)
+			pos += ret;
+	}
+
+	return size;
 }
 
 static char from_hex(unsigned char v)
@@ -471,11 +487,11 @@ static void destroy_child(struct child_proc *child)
 	free(child);
 }
 
-static int start_child(struct child_proc *child __attribute__((unused)))
+static int start_child(struct child_proc *child)
 {
-	int err_pipe[2], ret, last_errno;
+	int err_pipe[2], ret;
 	pid_t pid;
-	char buf[10];
+	char buf[16];
 
 	if (pipe2(err_pipe, O_CLOEXEC) == -1) {
 		perror("pipe2");
@@ -499,8 +515,7 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 
 		execvp(child->argv[0], child->argv);
 	child_error:
-		last_errno = errno;
-		write(err_pipe[1], &last_errno, sizeof(last_errno));
+		do_write(err_pipe[1], buf, sprintf(buf, "errno=%d\n", errno));
 		_exit(127);
 	}
 
@@ -512,14 +527,16 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 	child->fd[0] = child->fd[1] = child->fd[2] = -1;
 	child->pid = pid;
 
-	/* check if the child forked properly */
+	/* send the pid= or the errno= back to the client */
 	ret = read(err_pipe[0], buf, sizeof(buf));
 	if (ret) {
+		do_write(child->exit_pipe, buf, ret);
 		close(err_pipe[0]);
-		errno = atoi(buf);
 		return -1;
 	}
+
 	close(err_pipe[0]);
+	do_write(child->exit_pipe, buf, sprintf(buf, "pid=%d\n", pid));
 	list_add(&child->list, &children);
 
 	cleaved_log_msg("started %s pid %d\n", child->argv[0], pid);
@@ -531,6 +548,7 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 static int reap_child()
 {
 	struct child_proc *child;
+	char buf[16];
 	int status;
 	pid_t pid;
 
@@ -544,8 +562,8 @@ static int reap_child()
 	list_for_each_entry(child, &children, list) {
 		if (child->pid == pid) {
 			list_del(&child->list);
-			/* notify the client process */
-			write(child->exit_pipe, &status, sizeof(status));
+			/* notify the client */
+			do_write(child->exit_pipe, buf, sprintf(buf, "rc=%d\n", status));
 			destroy_child(child);
 			return 0;
 		}
@@ -715,7 +733,6 @@ int main(int argc, char *argv[])
 		} else {
 			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
 				cleaved_log_dbg("socket %d: closed\n", ev.data.fd);
-				epoll_op(EPOLL_CTL_DEL, EPOLLIN, ev.data.fd);
 				close(ev.data.fd);
 				if (ev.data.fd == socket_number) {
 					cleaved_log_msg("parent process closed. exiting\n");

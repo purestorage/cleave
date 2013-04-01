@@ -1,4 +1,4 @@
-CFLAGS := -O2 -g -Werror -Wall -Wextra -std=gnu99 -ggdb -D_GNU_SOURCE -Wno-unused-result
+CFLAGS := -O2 -g -Werror -Wall -Wextra -std=gnu99 -ggdb -D_GNU_SOURCE
 
 default: cleaved/cleaved libcleave/libcleave.so test/test
 

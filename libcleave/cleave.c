@@ -50,22 +50,30 @@
 #include <cleave.h>
 #include "syscall.h"
 
+/**
+ * @child_pid: The pid of the cleaved process we started, or -1 if attached.
+ * @sock: The socket used to talk to cleaved.
+ */
 struct cleave_handle {
 	pid_t child_pid;
 	int sock;
 };
 
+/**
+ * @buf: fields returned by cleaved
+ * @buflen: length of %buf
+ * @wait_pipe: Pipe used to return %buf
+ */
 struct cleave_child {
+	char *buf;
+	ssize_t buflen;
 	int wait_pipe;
 };
 
 static char * const daemon_path = "cleaved";
 
 static void cleave_log_null(char const *format __attribute__((unused)),
-			    va_list args __attribute__((unused)))
-{
-}
-
+			    va_list args __attribute__((unused))) { }
 static void (*cleave_logfn)(char const *format, va_list args) = cleave_log_null;
 
 static void __attribute__((format (printf, 1, 2)))
@@ -190,13 +198,17 @@ struct cleave_handle * cleave_create(int error_fd)
 	/* all sockets/pipes are CLOEXEC in the parent */
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sock) == -1) {
 		cleave_perror("socketpair");
-		goto exit_close;
+		free(handle);
+		return NULL;
 	}
 	snprintf(child_port, sizeof(child_port), "%d", sock[1]);
 
 	if (pipe2(err_pipe, O_CLOEXEC) == -1) {
 		cleave_perror("pipe2");
-		goto exit_pipe;
+		if (do_close(sock[0]) || do_close(sock[1]))
+			cleave_perror("close");
+		free(handle);
+		return NULL;
 	}
 
 	pid = fork();
@@ -249,36 +261,27 @@ struct cleave_handle * cleave_create(int error_fd)
 	}
 
 	/* parent */
-	do_close(err_pipe[1]);
-	do_close(sock[1]);
+	if (do_close(err_pipe[1]) || do_close(sock[1]))
+		cleave_perror("close");
 	sock[1] = -1;
 
 	/* check if the child forked properly */
 	ret = do_read(err_pipe[0], &last_errno, sizeof(last_errno));
 	if (ret) {
-		do_close(err_pipe[0]);
-		do_close(sock[0]);
+		if (do_close(err_pipe[0]) || do_close(sock[0]))
+			cleave_perror("close");
 		free(handle);
 		if (ret == sizeof(last_errno))
 			errno = last_errno;
 		return NULL;
 	}
-	do_close(err_pipe[0]);
+	if (do_close(err_pipe[0]))
+		cleave_perror("close");
 
 	handle->child_pid = pid;
 	handle->sock = sock[0];
 
 	return handle;
-
-exit_pipe:
-	last_errno = errno;
-	do_close(sock[0]);
-	do_close(sock[1]);
-	errno = last_errno;
-exit_close:
-	free(handle);
-
-	return NULL;
 }
 
 struct cleave_handle * cleave_attach(char const *path)
@@ -299,7 +302,7 @@ struct cleave_handle * cleave_attach(char const *path)
 		return NULL;
 	}
 
-	sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (sock == -1) {
 		cleave_perror("socket");
 		goto exit_socket;
@@ -319,7 +322,8 @@ struct cleave_handle * cleave_attach(char const *path)
 
 exit_connect:
 	last_errno = errno;
-	do_close(sock);
+	if (do_close(sock))
+		cleave_perror("close");
 	errno = last_errno;
 exit_socket:
 	free(handle);
@@ -329,20 +333,76 @@ exit_socket:
 
 void cleave_destroy(struct cleave_handle *handle)
 {
-	do_close(handle->sock);
+	if (do_close(handle->sock))
+		cleave_perror("close");
 
 	if (handle->child_pid) {
 		int status;
-		do_waitpid(handle->child_pid, &status, 0);
+		if (do_waitpid(handle->child_pid, &status, 0) == -1)
+			cleave_perror("waitpid");
 	}
 
 	free(handle);
 }
 
+/* Read more data from the (blocking) child exit_pipe */
+static int child_readmsg(struct cleave_child *child)
+{
+	char *newbuf, buf[64];
+	int ret;
+
+	ret = do_read(child->wait_pipe, buf, sizeof(buf));
+	if (ret < 0) {
+		cleave_perror("read");
+		return -1;
+	} else if (ret == 0) {
+		cleave_log("unexpected end of wait_pipe");
+		return -1;
+	}
+
+	newbuf = realloc(child->buf, child->buflen + ret);
+	if (!newbuf) {
+		errno = ENOMEM;
+		cleave_perror("malloc");
+		return -1;
+	}
+	memcpy(newbuf + child->buflen, buf, ret);
+	child->buf = newbuf;
+	child->buflen += ret;
+	return 0;
+}
+
+/* Search for the given field in the child msg buffer. Returns true if
+ * the field was present */
+static bool child_getfield(struct cleave_child *child, char *field, int *value)
+{
+	int i, fieldlen, sol;
+
+	if (!child->buf)
+		return false;
+
+	fieldlen = strlen(field);
+	sol = 0;
+	for (i = 0; i < child->buflen; i++) {
+		if (child->buf[i] == '\n') {
+			if (i - sol >= fieldlen + 2) {
+				if (!strncmp(child->buf + sol, field, fieldlen) &&
+				    child->buf[sol + fieldlen] == '=') {
+					*value = atoi(child->buf + sol + fieldlen + 1);
+					return true;
+				}
+			}
+			sol = i + 1;
+		}
+	}
+
+	return false;
+}
+
 struct cleave_child *cleave_child(struct cleave_handle *handle, char const **argv, int in_fd[3])
 {
-	int fd[4], exit_pipe[2], nullfd = -1, i, ret;
-	struct cleave_child * child;
+	int fd[4], exit_pipe[2], nullfd = -1, i, ret, child_errno = 0;
+	struct cleave_child *child;
 	char *encoded_args;
 	struct iovec data;
 	struct msghdr hdr;
@@ -355,6 +415,7 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 		cleave_perror("malloc");
 		return NULL;
 	}
+	memset(child, 0, sizeof(*child));
 
 	encoded_args = encodeargs(argv);
 	if (!encoded_args) {
@@ -362,7 +423,7 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 		goto exit_encode;
 	}
 
-	/* We use a pipe to wait for the process to terminate */
+	/* We use a blocking pipe to send pid/rc back from cleaved */
 	if (pipe2(exit_pipe, O_CLOEXEC) == -1) {
 		cleave_perror("pipe2");
 		goto exit_pipe;
@@ -370,7 +431,7 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 
 	/* We can't pass invalid file descriptors over the socket,
 	 * so pass fds to null instead */
-	memcpy(fd, in_fd, sizeof(in_fd));
+	memcpy(fd, in_fd, sizeof(int) * 3);
 	if (fd[0] == -1 || fd[1] == -1 || fd[2] == -1) {
 		nullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
 		if (nullfd == -1) {
@@ -410,25 +471,48 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 		goto exit_sendmsg;
 	}
 
-	if (nullfd != -1)
-		do_close(nullfd);
-	do_close(exit_pipe[1]);
+	if (do_close(exit_pipe[1]))
+		cleave_perror("close");
+	exit_pipe[1] = -1;
+	child->wait_pipe = exit_pipe[0];
+
+	/* Block until we receive pid= or errno= so we can return a good error code.
+	 * This also allows the client to use select/poll/epoll via cleave_wait_fd(),
+	 * without getting confused by additional fields. */
+	while (true) {
+		if (child_getfield(child, "errno", &child_errno))
+			goto exit_last;
+		if (child_getfield(child, "pid", &i))
+			break;
+		if (child_readmsg(child) == -1)
+			goto exit_last;
+	}
+
+	if (nullfd != -1) {
+		if (do_close(nullfd))
+			cleave_perror("close");
+	}
 	free(encoded_args);
 
-	child->wait_pipe = exit_pipe[0];
 	return child;
 
+exit_last:
 exit_sendmsg:
 	if (nullfd != -1)
 		close(nullfd);
 exit_nullfd:
-	do_close(exit_pipe[0]);
-	do_close(exit_pipe[1]);
+	for (i = 0; i < 2; i++) {
+		if (exit_pipe[i] != -1) {
+			if (do_close(exit_pipe[i]))
+				cleave_perror("close");
+		}
+	}
 exit_pipe:
 	free(encoded_args);
 exit_encode:
 	free(child);
-
+	if (child_errno)
+		errno = child_errno;
 	return NULL;
 }
 
@@ -437,29 +521,35 @@ int cleave_wait_fd(struct cleave_child *child)
 	return child->wait_pipe;
 }
 
+int cleave_pid(struct cleave_child *child)
+{
+	int pid;
+
+	while (true) {
+		if (child_getfield(child, "pid", &pid))
+			return pid;
+		if (child_readmsg(child) == -1)
+			return -1;
+	}
+}
+
 pid_t cleave_wait(struct cleave_child *child)
 {
-	pid_t pid = -1;
-	int ret;
+	pid_t ret;
 
-	/* Just block waiting for output from cleave_child */
-	for (;;) {
-		ret = do_read(child->wait_pipe, &pid, sizeof(pid));
-		if (ret == -1) {
-			cleave_perror("read");
+	while (true) {
+		if (child_getfield(child, "rc", &ret))
 			break;
-		}
-		else if (ret == sizeof(pid))
-			break;
-		else {
-			ret = -1;
-		}
+		if (child_readmsg(child) == -1)
+			return -1;
 	}
-
-	do_close(child->wait_pipe);
+	if (do_close(child->wait_pipe))
+		cleave_perror("close");
+	if (child->buf)
+		free(child->buf);
 	free(child);
 
-	return 0;
+	return ret;
 }
 
 pid_t cleave_exec(struct cleave_handle *handle,
@@ -472,7 +562,7 @@ pid_t cleave_exec(struct cleave_handle *handle,
 	struct epoll_event ev;
 	struct cleave_child *child = NULL;
 	bool close_fd;
-	pid_t pid = 0;
+	pid_t pid = -1;
 
 	/* Verify input parameters */
 	for (i = 0; i < 3; i++) {
@@ -504,7 +594,8 @@ pid_t cleave_exec(struct cleave_handle *handle,
 		goto fail;
 	for (i = 0; i < 3; i++) {
 		if (param[i].rw || param[i].iov.iov_base) {
-			do_close(child_fd[i]);
+			if (do_close(child_fd[i]))
+				cleave_perror("close");
 			child_fd[i] = -1;
 		}
 	}
@@ -581,7 +672,8 @@ pid_t cleave_exec(struct cleave_handle *handle,
 				/* populate the output data length */
 				if (param[i].iov.iov_base)
 					param[i].iov.iov_len = offset[i];
-				do_close(parent_fd[i]);
+				if (do_close(parent_fd[i]))
+					cleave_perror("close");
 				parent_fd[i] = -1;
 				--open_fds;
 			}
@@ -593,20 +685,27 @@ pid_t cleave_exec(struct cleave_handle *handle,
 		}
 	}
 
-	do_close(epollfd);
+	if (do_close(epollfd))
+		cleave_perror("close");
 
 	return pid;
 
 fail:
 	last_errno = errno;
 	for (i = 0; i < 3; i++) {
-		if (parent_fd[i] != -1)
-			do_close(parent_fd[i]);
-		if (child_fd[i] != -1)
-			do_close(child_fd[i]);
+		if (parent_fd[i] != -1) {
+			if (do_close(parent_fd[i]))
+				cleave_perror("close");
+		}
+		if (child_fd[i] != -1) {
+			if (do_close(child_fd[i]))
+				cleave_perror("close");
+		}
 	}
-	if (epollfd != -1)
-		do_close(epollfd);
+	if (epollfd != -1) {
+		if (do_close(epollfd))
+			cleave_perror("close");
+	}
 	errno = last_errno;
 	return -1;
 }

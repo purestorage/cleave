@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -65,6 +66,10 @@ int main()
 	int i;
 
 	cleave_set_logfn(logger);
+
+	/* Close all file descriptors for test 9 */
+	for (i = 3; i < 1024; i++)
+		close(i);
 
 	/* Test 1: cleave_create */
 	printf("Test 1\n");
@@ -174,10 +179,27 @@ int main()
 
 		handle_inner = cleave_attach(socket);
 		assert(handle_inner);
+
+		/* Test 8: Handle an exec failure */
+		{
+			char const *argv[] = {"does_not_exist", NULL};
+			int fd[] = {0, 1, 2};
+			struct cleave_child *child2;
+
+			child2 = cleave_child(handle_inner, argv, fd);
+			assert(child2 == NULL);
+			assert(errno == ENOENT);
+		}
+
 		cleave_destroy(handle_inner);
 
+		/* Test 9: kill the child and verify the signal is correct */
+		pid = cleave_pid(child);
+		assert(pid > 0);
+		kill(pid, SIGFPE);
+
 		pid = cleave_wait(child);
-		assert(pid == 0);
+		assert(pid == 128 + SIGFPE);
 	}
 
 	cleave_destroy(handle);
