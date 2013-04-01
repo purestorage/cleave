@@ -198,17 +198,13 @@ struct cleave_handle * cleave_create(int error_fd)
 	/* all sockets/pipes are CLOEXEC in the parent */
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sock) == -1) {
 		cleave_perror("socketpair");
-		free(handle);
-		return NULL;
+		goto exit_socket;
 	}
 	snprintf(child_port, sizeof(child_port), "%d", sock[1]);
 
 	if (pipe2(err_pipe, O_CLOEXEC) == -1) {
 		cleave_perror("pipe2");
-		if (do_close(sock[0]) || do_close(sock[1]))
-			cleave_perror("close");
-		free(handle);
-		return NULL;
+		goto exit_pipe;
 	}
 
 	pid = fork();
@@ -282,6 +278,14 @@ struct cleave_handle * cleave_create(int error_fd)
 	handle->sock = sock[0];
 
 	return handle;
+
+exit_pipe:
+	if (do_close(sock[0]) || do_close(sock[1]))
+		cleave_perror("close");
+exit_socket:
+	free(handle);
+
+	return NULL;
 }
 
 struct cleave_handle * cleave_attach(char const *path)

@@ -60,6 +60,7 @@ struct child_proc {
 	int fd[3];
 	int exit_pipe;
 	pid_t pid;
+	struct ucred uc;
 };
 
 static int epollfd;
@@ -403,6 +404,7 @@ static struct child_proc *read_incoming_message(int sock)
 	struct iovec data;
 	struct msghdr hdr;
 	struct cmsghdr *cmsg;
+	socklen_t optlen;
 
 	child = malloc(sizeof(struct child_proc));
 	if (!child)
@@ -441,6 +443,10 @@ static struct child_proc *read_incoming_message(int sock)
 	}
 
 	if (decode_message(child, readbuf) == -1)
+		goto exit_recvmsg;
+
+	optlen = sizeof(child->uc);
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &child->uc, &optlen) == -1)
 		goto exit_recvmsg;
 
 	memcpy(fd, CMSG_DATA(cmsg), sizeof(fd));
@@ -512,6 +518,12 @@ static int start_child(struct child_proc *child)
 		close(child->fd[0]);
 		close(child->fd[1]);
 		close(child->fd[2]);
+
+		if (geteuid() == 0) {
+			/* Switch to the connecting credentials */
+			if (setuid(child->uc.uid) || setgid(child->uc.gid))
+				goto child_error;
+		}
 
 		execvp(child->argv[0], child->argv);
 	child_error:
