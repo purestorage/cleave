@@ -41,6 +41,9 @@
 struct cleave_handle;
 struct cleave_child;
 
+/* Provide a callback for cleave logging */
+void cleave_set_logfn(void (*log)(char const *format, va_list args));
+
 /* Fork a new cleave daemon.
  *
  * This handle must be destroyed by calling cleave_destroy(), which will cause
@@ -64,7 +67,7 @@ void cleave_destroy(struct cleave_handle *handle);
 /* Execute a child process
  *
  * The fd array is an array of three pipe fd's - stdin, stdout, stderr. Any
- * one of these fds can be -1 in which case the fd will be duped to /dev/null
+ * one of these fds can be -1 in which case the fd will be duped to /dev/null.
  *
  * The returned handle *must* be freed by calling cleave_wait().
  */
@@ -81,33 +84,42 @@ struct cleave_child * cleave_child(struct cleave_handle *handle,
  */
 pid_t cleave_wait(struct cleave_child *child);
 
-/* Return a file descriptor that can be used in select/poll/epoll to determine
- * when to call cleave_wait(). It is the callers responsibility to close this
- * file descriptor once cleave_wait returns. Do *not* read/write to this file
- * descriptor.
+/* Return a *new* file descriptor that can be used in select/poll/epoll to
+ * determine when to call cleave_wait(). It is the callers responsibility to
+ * close this file descriptor once cleave_wait returns. Do *not* read/write
+ * to this file descriptor.
  */
 int cleave_wait_fd(struct cleave_child *child);
 
+/* Return the pid of the child */
+pid_t cleave_pid(struct cleave_child *child);
+
 /* Execute a child process and block waiting for the child to complete.
  *
- * You can optionally provide callbacks to write(2) data into the child stdin,
- * and read(2) data from stdout and stderr. All file descriptors are
- * non-blocking. These callbacks will keep being called so long as they
- * return zero (success).
+ * Each of stdin, stdout, stderr can be dup2'd to an existing file descriptor
+ * (in which case it is the callers responsibility to ensure we don't deadlock),
+ * or a callback parameterised by the file descriptor.
  *
- * Returns -1 with errno set appropriately on an error, otherwise returns the
- * child process exit code.
+ * rw: Provide a callback to read/write to the file descriptor. Keep reading
+ *	writing until there's more data to write, or until read() returns zero.
+ *	Return non-zero to close the file descriptor [do not under any
+ *	circumstances call fclose() yourself].
+ * iovec: Provide a single buffer for stdin and a single buffer for stdout/stderr.
+ *	When the process has complete iov_len will be set to the number of bytes
+ *	actually transferred.
  */
-pid_t cleave_popen(char const **argv,
-		   int (*write_stdin)(int fd),
-		   int (*read_stdout)(int fd),
-		   int (*read_stderr)(int fd),
-		   void *priv);
+struct cleave_exec_param {
+	int dup2_fd;
+	int (*rw)(int fd, void *priv);
+	struct iovec iov;
+};
+
+pid_t cleave_exec(struct cleave_handle *handle,
+		  char const **argv, struct cleave_exec_param param[3],
+		  void *priv);
 
 #ifdef __cplusplus
 }
 #endif
-
-
 
 #endif

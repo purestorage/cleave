@@ -32,14 +32,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/**
- * TODO
- * signalfd for SIGHUP and SIGCHILD, process notification
- * better logging
- * SA_RESTART
- *...
- */
-
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,38 +40,174 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <assert.h>
+#include <time.h>
+#include <stdarg.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <sys/signalfd.h>
+
+struct list_head {
+	struct list_head *prev;
+	struct list_head *next;
+};
 
 struct child_proc {
-	struct child_proc *next;
+	struct list_head list;
 	char **argv;
 	int fd[3];
 	int exit_pipe;
 	pid_t pid;
 };
 
+static int epollfd;
+static int sigfd;
+static int debug;
 static char *readbuf;
 static size_t readbuf_len;
+struct list_head children;
+static FILE *logfile;
 
-#define verb(...) fprintf(stderr, __VA_ARGS__)
+/********************* Logging **********************/
 
-static void  __attribute__((noreturn)) out_of_memory()
+static void
+cleaved_log(char const *format, const char *level, va_list args)
 {
-	verb("out of memory");
+	time_t t;
+	struct tm *tm;
+	char s[40];
+
+	t = time(NULL);
+	tm = localtime(&t);
+	strftime(s, sizeof(s), "%b %e %H:%M:%S", tm);
+
+	fprintf(logfile, "%s cleaved[%s]: ", s, level);
+	vfprintf(logfile, format, args);
+	fflush(logfile);
+}
+
+static void __attribute__((format (printf, 1, 2)))
+cleaved_log_err(char const *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	cleaved_log(format, "ERR", args);
+	va_end(args);
+}
+
+static void
+cleaved_perror(const char *s)
+{
+	cleaved_log_err("%s: %s\n", s, strerror(errno));
+}
+
+static void __attribute__((format (printf, 1, 2)))
+cleaved_log_msg(const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	cleaved_log(format, "MSG", args);
+	va_end(args);
+}
+
+static void  __attribute__((format (printf, 1, 2)))
+cleaved_log_dbg(const char *format, ...)
+{
+	va_list args;
+
+	if (!debug)
+		return;
+
+	va_start(args, format);
+	cleaved_log(format, "MSG", args);
+	va_end(args);
+}
+
+static void
+reopen_logfile(char const *name)
+{
+	if (name) {
+		if (fflush(logfile))
+			cleaved_perror("fflush");
+		if (logfile != stderr && fclose(logfile))
+			cleaved_perror("fclose");
+	}
+	if (!name)
+		logfile = stderr;
+	else {
+		logfile = fopen(name, "a");
+		if (!logfile) {
+			logfile = stderr;
+			cleaved_perror("fopen");
+		}
+	}
+}
+
+/********************* List handling *******************/
+
+#define offsetof(_type, _member) ((size_t) &((_type *)0)->_member)
+
+#define list_entry(_ptr, _type, _member)			\
+	((_type *)((char *)(_ptr) - offsetof(_type, _member)))
+
+static void list_init(struct list_head *list)
+{
+	list->next = list;
+	list->prev = list;
+}
+
+static void __list_add(struct list_head *new,
+		       struct list_head *prev,
+		       struct list_head *next)
+{
+	next->prev = new;
+	new->next = next;
+	new->prev = prev;
+	prev->next = new;
+}
+
+static void list_add(struct list_head *new, struct list_head *head)
+{
+	__list_add(new, head, head->next);
+}
+
+static void __list_del(struct list_head * prev, struct list_head * next)
+{
+	next->prev = prev;
+	prev->next = next;
+}
+
+static void list_del(struct list_head *entry)
+{
+	__list_del(entry->prev, entry->next);
+}
+
+#define list_for_each_entry(pos, head, member)				\
+	for (pos = list_entry((head)->next, typeof(*pos), member);	\
+	     &pos->member != head;					\
+	     pos = list_entry(pos->member.next, typeof(*pos), member))
+
+/********************* Operations **********************/
+
+static void  __attribute__((noreturn))
+out_of_memory()
+{
+	cleaved_log_err("out of memory");
 	abort();
 }
 
-static int epoll_op(int epollfd, int op, int flags, int fd)
+static int epoll_op(int op, int flags, int fd)
 {
 	struct epoll_event ev;
 
 	ev.events = flags;
 	ev.data.fd = fd;
 	if (epoll_ctl(epollfd, op, fd, &ev) == -1) {
-		perror("epoll_ctl");
+		cleaved_perror("epoll_ctl");
 		return -1;
 	}
 
@@ -92,72 +220,17 @@ static int do_fcntl(int sock, int get, int set, int add_flags, int del_flags)
 
 	 flags = fcntl(sock, get, 0);
 	 if (flags == -1) {
-		 perror("fcntl");
+		 cleaved_perror("fcntl");
 		 return -1;
 	 }
 	 flags = (flags | add_flags) & ~del_flags;
 	 s = fcntl(sock, set, flags);
 	 if (s == -1) {
-		 perror("fcntl");
+		 cleaved_perror("fcntl");
 		 return -1;
 	 }
 
 	 return 0;
-}
-
-static int setup_listen_socket(char *path)
-{
-	int sock;
-	struct sockaddr_un local;
-	int len;
-
-	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (sock == -1) {
-		perror("socket");
-		return -1;
-	}
-	local.sun_family = AF_UNIX;
-	strcpy(local.sun_path, path);
-	unlink(path); // ignore error
-	len = strlen(local.sun_path) + sizeof(local.sun_family);
-	if (bind(sock, (struct sockaddr *)&local, len) == -1) {
-		perror("bind");
-		return -1;
-	}
-	if (listen(sock, 5) == -1) {
-		perror("listen");
-		return -1;
-	}
-
-	return sock;
-}
-
-static int accept_listen_socket(int socket, int epollfd)
-{
-	while (1) {
-		struct sockaddr in_addr;
-		socklen_t in_len;
-		int in_fd;
-
-		in_len = sizeof(in_addr);
-		in_fd = accept(socket, &in_addr, &in_len);
-		if (in_fd == -1) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			perror("accept");
-			return -1;
-		}
-
-		if (do_fcntl(in_fd, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
-		    do_fcntl(in_fd, F_GETFL, F_SETFL, O_NONBLOCK, 0) ||
-		    epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, in_fd)) {
-			close(in_fd);
-			return -1;
-		}
-		verb("socket %d: connected\n", in_fd);
-	}
-
-	return 0;
 }
 
 static char from_hex(unsigned char v)
@@ -192,6 +265,63 @@ static int urldecode(char const *str, char *ret)
 	return pret - ret;
 }
 
+/********************* Socket handling **********************/
+
+static int setup_listen_socket(char *path)
+{
+	int sock;
+	struct sockaddr_un local;
+	int len;
+
+	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (sock == -1) {
+		cleaved_perror("socket");
+		return -1;
+	}
+	local.sun_family = AF_UNIX;
+	strcpy(local.sun_path, path);
+	unlink(path); // ignore error
+	len = strlen(local.sun_path) + sizeof(local.sun_family);
+	if (bind(sock, (struct sockaddr *)&local, len) == -1) {
+		cleaved_perror("bind");
+		return -1;
+	}
+	if (listen(sock, 5) == -1) {
+		cleaved_perror("listen");
+		return -1;
+	}
+
+	return sock;
+}
+
+static int accept_listen_socket(int socket)
+{
+	while (1) {
+		struct sockaddr in_addr;
+		socklen_t in_len;
+		int in_fd;
+
+		in_len = sizeof(in_addr);
+		in_fd = accept(socket, &in_addr, &in_len);
+		if (in_fd == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			cleaved_perror("accept");
+			return -1;
+		}
+
+		if (do_fcntl(in_fd, F_GETFD, F_SETFD, O_CLOEXEC, 0) ||
+		    do_fcntl(in_fd, F_GETFL, F_SETFL, O_NONBLOCK, 0) ||
+		    epoll_op(EPOLL_CTL_ADD, EPOLLIN, in_fd)) {
+			close(in_fd);
+			return -1;
+		}
+		cleaved_log_dbg("socket %d: connected\n", in_fd);
+	}
+
+	return 0;
+}
+
 /* Message consists of
  *   exec=urlencode(argv[0]),urlencode(argv[1]),urlencode(argv[2])\n
  */
@@ -201,7 +331,7 @@ static int decode_message(struct child_proc *child, char *buf)
 	char **argv, *pbuf, *argbuf;
 
 	if (strncmp(buf, "exec=", 5)) {
-		verb("unknown message type\n");
+		cleaved_log_dbg("unknown message type\n");
 		return -1;
 	}
 	buf += 5;
@@ -221,7 +351,7 @@ static int decode_message(struct child_proc *child, char *buf)
 	if (!argv)
 		out_of_memory();
 
-	/* Allocate a single buffer for all of the decoded strings, which
+	/* Allocate a single buffer for all of trhe decoded strings, which
 	 * is guaranteed to be less than the number of bytes above */
 	argbuf = malloc(size);
 	if (!argbuf)
@@ -278,19 +408,19 @@ static struct child_proc *read_incoming_message(int sock)
 
 	ret = recvmsg(sock, &hdr, MSG_CMSG_CLOEXEC);
 	if (ret == -1) {
-		perror("recvmsg");
+		cleaved_perror("recvmsg");
 		goto exit_recvmsg;
 	}
 
 	if (hdr.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) {
-		verb("recvmsg truncated\n");
+		cleaved_log_dbg("recvmsg truncated\n");
 		goto exit_recvmsg;
 	}
 
 	cmsg = CMSG_FIRSTHDR(&hdr);
 	nfd = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(fd[0]);
 	if (nfd != 4) {
-		verb("incorrect number of file descriptors %d\n", (int)nfd);
+		cleaved_log_dbg("incorrect number of file descriptors %d\n", (int)nfd);
 		goto exit_recvmsg;
 	}
 
@@ -328,7 +458,6 @@ static void destroy_child(struct child_proc *child)
 {
 	size_t i;
 
-	assert(!child->next);
 	if (child->argv) {
 		free(child->argv[0]);
 		free(child->argv);
@@ -344,7 +473,7 @@ static void destroy_child(struct child_proc *child)
 
 static int start_child(struct child_proc *child __attribute__((unused)))
 {
-	int err_pipe[2], ret;
+	int err_pipe[2], ret, last_errno;
 	pid_t pid;
 	char buf[10];
 
@@ -370,8 +499,8 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 
 		execvp(child->argv[0], child->argv);
 	child_error:
-		ret = snprintf(buf, sizeof(buf), "%d", errno);
-		ret = write(err_pipe[1], buf, ret);
+		last_errno = errno;
+		write(err_pipe[1], &last_errno, sizeof(last_errno));
 		_exit(127);
 	}
 
@@ -381,6 +510,7 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 	close(child->fd[1]);
 	close(child->fd[2]);
 	child->fd[0] = child->fd[1] = child->fd[2] = -1;
+	child->pid = pid;
 
 	/* check if the child forked properly */
 	ret = read(err_pipe[0], buf, sizeof(buf));
@@ -390,9 +520,71 @@ static int start_child(struct child_proc *child __attribute__((unused)))
 		return -1;
 	}
 	close(err_pipe[0]);
+	list_add(&child->list, &children);
+
+	cleaved_log_msg("started %s pid %d\n", child->argv[0], pid);
+
 	return 0;
 }
 
+/* A child process has finished. reap and notify */
+static int reap_child()
+{
+	struct child_proc *child;
+	int status;
+	pid_t pid;
+
+	pid = waitpid(-1, &status, WNOHANG);
+	if (pid < 0) {
+		cleaved_log_err("waitpid returned %d\n", pid);
+		return -1;
+	}
+
+	cleaved_log_dbg("pid %d completed status %d\n", pid, status);
+	list_for_each_entry(child, &children, list) {
+		if (child->pid == pid) {
+			list_del(&child->list);
+			/* notify the client process */
+			write(child->exit_pipe, &status, sizeof(status));
+			destroy_child(child);
+			return 0;
+		}
+	}
+
+	cleaved_log_err("unknown child pid %d completed\n", pid);
+	return -1;
+}
+
+static int setup_event_fds()
+{
+	sigset_t		sigmask;
+
+	epollfd = epoll_create(1);
+	if (epollfd < 0) {
+		cleaved_perror("epoll_create");
+		return -1;
+	}
+
+	sigemptyset(&sigmask);
+	sigaddset(&sigmask, SIGHUP);
+	sigaddset(&sigmask, SIGCHLD);
+
+	if (sigprocmask(SIG_BLOCK, &sigmask, NULL) < 0) {
+		cleaved_perror("sigprocmask");
+		return -1;
+	}
+
+	sigfd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+	if (sigfd < 0) {
+		cleaved_perror("signalfd");
+		return -1;
+	}
+
+	if (epoll_op(EPOLL_CTL_ADD, EPOLLIN, sigfd))
+		return -1;
+
+	return 0;
+}
 
 static void usage(char const *prog)
 {
@@ -402,28 +594,34 @@ static void usage(char const *prog)
         printf("Options:\n");
         printf("  -l, --listen=<path>     open a unix domain socket at the given path\n");
         printf("  -n, --number=<fd>       start listening on the given socket number\n");
+	printf("  -o, --logfile=<path>    path for logging. SIGHUP is supported\n");
+	printf("  -d, --debug             enable debug logging\n");
         printf("  -h, --help              print this usage information and exit\n");
 	printf("\n");
 }
 
 int main(int argc, char *argv[])
 {
-	static int epollfd;
 	struct epoll_event ev;
-	char *listen_path = NULL;
+	char *listen_path = NULL, *logfile_name = NULL;
 	int  socket_number = -1, listen_socket = -1, ret;
-	struct child_proc *child, *children = NULL;
+	struct child_proc *child;
+
+	logfile = stderr;
 
 	while (1) {
 		int c;
 
 		static struct option long_options[] = {
-			{ .name = "listen",     .has_arg = 1,   .val = 'l' },
-			{ .name = "number",     .has_arg = 1,   .val = 'n' },
-			{ .name = "help",       .has_arg = 0,   .val = 'h' },
+			{ .name = "listen",     .has_arg = required_argument,   .val = 'l' },
+			{ .name = "number",     .has_arg = required_argument,   .val = 'n' },
+			{ .name = "logfile",    .has_arg = required_argument,   .val = 'o' },
+			{ .name = "debug",      .has_arg = no_argument,         .val = 'd' },
+			{ .name = "help",       .has_arg = no_argument,         .val = 'h' },
+			{ 0 },
 		};
 
-		c = getopt_long(argc, argv, "l:n:h", long_options, NULL);
+		c = getopt_long(argc, argv, "l:n:o:dh", long_options, NULL);
 		if (c == -1)
 			break;
 
@@ -434,6 +632,12 @@ int main(int argc, char *argv[])
 		case 'n':
 			socket_number = atoi(optarg);
                         break;
+		case 'o':
+			logfile_name = strdupa(optarg);
+			break;
+		case 'd':
+			debug = 1;
+			break;
 		case 'h':
 			usage(argv[0]);
 			return 0;
@@ -445,6 +649,8 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	reopen_logfile(logfile_name);
+
 	/* read_incoming_message receives a message containing an array of
 	 * urlencoded arguments:
 	 *   arg=%5D\n
@@ -455,25 +661,24 @@ int main(int argc, char *argv[])
 	if (!readbuf)
 		out_of_memory();
 
-	epollfd = epoll_create(1);
-	if (epollfd < 0) {
-		perror("epoll_create");
+	if (setup_event_fds())
 		return 2;
-	}
 	
         if (socket_number != -1) {
 		if (do_fcntl(socket_number, F_GETFD, F_SETFD, FD_CLOEXEC, 0) ||
 		    do_fcntl(socket_number, F_GETFL, F_SETFL, O_NONBLOCK, 0))
 			return 3;
-		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, socket_number))
+		if (epoll_op(EPOLL_CTL_ADD, EPOLLIN, socket_number))
 			return 4;
         } else if (listen_path) {
                 listen_socket = setup_listen_socket(listen_path);
                 if (listen_socket < 0)
                         return 5;
-		if (epoll_op(epollfd, EPOLL_CTL_ADD, EPOLLIN, listen_socket))
+		if (epoll_op(EPOLL_CTL_ADD, EPOLLIN, listen_socket))
 			return 6;
 	}
+
+	list_init(&children);
 
         /* Main event loop */
 
@@ -482,40 +687,49 @@ int main(int argc, char *argv[])
                 if (ret < 0) {
                         if (errno == EINTR)
                                 continue;
-                        perror("epoll_wait");
+                        cleaved_perror("epoll_wait");
                         return 7;
                 }
                 if (ret == 0)
                         continue;
 
                 if (ev.data.fd == listen_socket) {
-                        int new_socket = accept_listen_socket(listen_socket, epollfd);
+                        int new_socket = accept_listen_socket(listen_socket);
                         if (new_socket < 0)
 				return 8;
-                } else {
+                } else if (ev.data.fd == sigfd) {
+			struct signalfd_siginfo	si;
+
+			if (read(sigfd, &si, sizeof si) < (int)sizeof(si)) {
+				cleaved_perror("read");
+				return 9;
+			}
+			if (si.ssi_signo == SIGHUP) {
+				reopen_logfile(logfile_name);
+
+			} else if (si.ssi_signo == SIGCHLD) {
+				if (reap_child() == -1) {
+					return 10;
+				}
+			}
+		} else {
 			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
-				verb("socket %d: closed\n", ev.data.fd);
-				epoll_op(epollfd, EPOLL_CTL_DEL, EPOLLIN, ev.data.fd);
+				cleaved_log_dbg("socket %d: closed\n", ev.data.fd);
+				epoll_op(EPOLL_CTL_DEL, EPOLLIN, ev.data.fd);
 				close(ev.data.fd);
 				if (ev.data.fd == socket_number) {
-					verb("parent process closed\n");
+					cleaved_log_msg("parent process closed. exiting\n");
 					break;
 				}
 			} else if (ev.events & EPOLLIN) {
-				verb("socket %d: incoming message\n", ev.data.fd);
+				cleaved_log_dbg("socket %d: incoming message\n", ev.data.fd);
 				child = read_incoming_message(ev.data.fd);
-				if (!child)
-					continue;
-
-				if (start_child(child) == -1) {
-					verb("unable to start %s\n", child->argv[0]);
-					destroy_child(child);
-					continue;
+				if (child) {
+					if (start_child(child) == -1) {
+						cleaved_log_err("unable to start %s\n", child->argv[0]);
+						destroy_child(child);
+					}
 				}
-
-				/* add the child to the list of children */
-				child->next = children;
-				children = child;
 			}
 		}
 	}
