@@ -42,7 +42,7 @@ static int state_stdout(int fd, void *priv)
 	int ret;
 
 	ret = read(fd, state->output + state->output_offset,
-		   state->output_length - state->output_offset);
+		   sizeof(state->output) - state->output_offset);
 	if (ret == -1) {
 		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
 			return 0;
@@ -67,10 +67,12 @@ int main()
 	cleave_set_logfn(logger);
 
 	/* Test 1: cleave_create */
+	printf("Test 1\n");
 	handle = cleave_create(2);
 	assert(handle);
 
 	/* Test 2: print to stdout via cleave_child/cleave_wait */
+	printf("Test 2\n");
 	{
 		char const *argv[] = {"/bin/echo", "test", NULL};
 		int fd[] = {0, 1, 2};
@@ -90,6 +92,8 @@ int main()
 		pid_t pid;
 		struct cleave_handle *handle_inner;
 
+		printf("Test 3\n");
+
 		child = cleave_child(handle, argv, fd);
 		assert(child);
 
@@ -98,11 +102,13 @@ int main()
 		handle_inner = cleave_attach(socket);
 		assert(handle_inner);
 
-		/* Test 3: Print to stdout via cleave_exec */
+		/* Test 4: Print to stdout via cleave_exec */
 		{
-			char const *argv[] = {"/bin/echo", "test3", NULL};
+			char const *argv[] = {"/bin/echo", "test4", NULL};
 			struct cleave_exec_param param[3];
 			pid_t pid;
+
+			printf("Test 4\n");
 
 			memset(&param, 0, sizeof(param));
 			for (i = 0; i < 3; i++)
@@ -112,11 +118,13 @@ int main()
 			assert(pid == 0);
 		}
 
-		/* Test 4: Provide stdin and stdout via callback */
+		/* Test 5: Provide stdin and stdout via callback */
 		{
 			char const *argv[] = {"sh", "-c", "cat | cat", NULL};
 			struct cleave_exec_param param[3];
 			struct test_state state;
+
+			printf("Test 5\n");
 
 			memset(&param, 0, sizeof(param));
 			param[0].dup2_fd = -1;
@@ -126,7 +134,7 @@ int main()
 			param[2].dup2_fd = 2;
 
 			memset(&state, 0, sizeof(state));
-			state.input_length = sprintf(state.input, "test4");
+			state.input_length = sprintf(state.input, "test5");
 
 			pid = cleave_exec(handle_inner, argv, param, &state);
 			assert(pid == 0);
@@ -134,12 +142,14 @@ int main()
 			assert(!strcmp(state.input, state.output));
 		}
 
-		/* Test 5: Provice stdin and stdout via iovec */
+		/* Test 6: Provice stdin and stdout via iovec */
 		{
 			char const *argv[] = {"sh", "-c", "cat | cat", NULL};
 			struct cleave_exec_param param[3];
-			char *input = "test5";
+			char *input = "test6";
 			char output[16];
+
+			printf("Test 6\n");
 
 			memset(&param, 0, sizeof(param));
 			param[0].dup2_fd = -1;
@@ -159,7 +169,9 @@ int main()
 
 		cleave_destroy(handle_inner);
 
-		/* Test 4: can we attach again */
+		/* Test 7: can we attach again */
+		printf("Test 7\n");
+
 		handle_inner = cleave_attach(socket);
 		assert(handle_inner);
 		cleave_destroy(handle_inner);

@@ -84,10 +84,12 @@ struct cleave_child * cleave_child(struct cleave_handle *handle,
  */
 pid_t cleave_wait(struct cleave_child *child);
 
-/* Return a *new* file descriptor that can be used in select/poll/epoll to
- * determine when to call cleave_wait(). It is the callers responsibility to
- * close this file descriptor once cleave_wait returns. Do *not* read/write
- * to this file descriptor.
+/* Return the file descriptor that cleave_wait() uses to determine when the
+ * child processes has exited. This file descriptor is one end of a pipe.
+ *
+ * Use this file descriptor with select/poll/epoll to determine when to
+ * call cleave_wait(), which will read from the pipe. Do not read/write from
+ * this file descriptor.
  */
 int cleave_wait_fd(struct cleave_child *child);
 

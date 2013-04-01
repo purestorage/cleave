@@ -68,7 +68,8 @@ static void cleave_log_null(char const *format __attribute__((unused)),
 
 static void (*cleave_logfn)(char const *format, va_list args) = cleave_log_null;
 
-static void cleave_log(char const *format, ...)
+static void __attribute__((format (printf, 1, 2)))
+cleave_log(char const *format, ...)
 {
 	va_list args;
 
@@ -370,8 +371,8 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 	/* We can't pass invalid file descriptors over the socket,
 	 * so pass fds to null instead */
 	memcpy(fd, in_fd, sizeof(in_fd));
-	if (in_fd[0] == -1 || in_fd[1] == -1 || in_fd[2] == -1) {
-		nullfd = open("/dev/null", O_RDWR);
+	if (fd[0] == -1 || fd[1] == -1 || fd[2] == -1) {
+		nullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
 		if (nullfd == -1) {
 			cleave_perror("open");
 			goto exit_nullfd;
@@ -433,7 +434,7 @@ exit_encode:
 
 int cleave_wait_fd(struct cleave_child *child)
 {
-	return dup(child->wait_pipe);
+	return child->wait_pipe;
 }
 
 pid_t cleave_wait(struct cleave_child *child)
@@ -466,11 +467,12 @@ pid_t cleave_exec(struct cleave_handle *handle,
 		  void *priv)
 {
 	int child_fd[3] = {-1, -1, -1}, parent_fd[3] = {-1, -1, -1};
-	int i, epollfd = -1, waitfd = -1, open_fds = 0, ret, last_errno;
+	int i, epollfd = -1, open_fds = 0, ret, last_errno;
 	size_t offset[3] = {0, 0, 0};
 	struct epoll_event ev;
 	struct cleave_child *child = NULL;
 	bool close_fd;
+	pid_t pid = 0;
 
 	/* Verify input parameters */
 	for (i = 0; i < 3; i++) {
@@ -501,7 +503,7 @@ pid_t cleave_exec(struct cleave_handle *handle,
 	if ((child = cleave_child(handle, argv, child_fd)) == NULL)
 		goto fail;
 	for (i = 0; i < 3; i++) {
-		if (param[i].rw) {
+		if (param[i].rw || param[i].iov.iov_base) {
 			do_close(child_fd[i]);
 			child_fd[i] = -1;
 		}
@@ -524,10 +526,9 @@ pid_t cleave_exec(struct cleave_handle *handle,
 			++open_fds;
 		}
 	}
-	if ((waitfd = cleave_wait_fd(child)) == -1)
-		goto fail;
+
 	ev.events = 0;
-	ev.data.fd = waitfd;
+	ev.data.fd = child->wait_pipe;
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, ev.data.fd, &ev) == -1) {
 		cleave_perror("epoll_ctl");
 		goto fail;
@@ -550,7 +551,6 @@ pid_t cleave_exec(struct cleave_handle *handle,
 		for (i = 0; i < 3; i++) {
 			if (parent_fd[i] != ev.data.fd)
 				continue;
-			fprintf(stderr, "i=%d events=%d\n", i, ev.events);
 			if (ev.events & (EPOLLIN | EPOLLOUT)) {
 				if (param[i].rw) {
 					if (param[i].rw(parent_fd[i], priv))
@@ -558,6 +558,7 @@ pid_t cleave_exec(struct cleave_handle *handle,
 				} else if (param[i].iov.iov_base) {
 					char *buf = param[i].iov.iov_base + offset[i];
 					int bytes = param[i].iov.iov_len - offset[i];
+					assert(bytes > 0);
 					if (i == 0)
 						ret = write(parent_fd[i], buf, bytes);
 					else
@@ -566,10 +567,10 @@ pid_t cleave_exec(struct cleave_handle *handle,
 						if (errno != EINTR && errno != EAGAIN &&
 						    errno != EWOULDBLOCK)
 							close_fd = true;
-					} else if (ret == 0)
-						close_fd = true;
-					else {
+					} else {
 						offset[i] += ret;
+						/* close the fd if the buffer
+						 * is exhausted */
 						close_fd = (param[i].iov.iov_len == offset[i]);
 					}
 				}
@@ -577,21 +578,24 @@ pid_t cleave_exec(struct cleave_handle *handle,
 			if (ev.events & (EPOLLHUP | EPOLLERR))
 				close_fd = true;
 			if (close_fd) {
+				/* populate the output data length */
+				if (param[i].iov.iov_base)
+					param[i].iov.iov_len = offset[i];
 				do_close(parent_fd[i]);
 				parent_fd[i] = -1;
 				--open_fds;
 			}
 		}
-		if (ev.data.fd == waitfd) {
-			do_close(waitfd);
-			waitfd = -1;
+		if (ev.data.fd == child->wait_pipe) {
+			/* This will close the file descriptor */
+			pid = cleave_wait(child);
 			--open_fds;
 		}
 	}
 
 	do_close(epollfd);
 
-	return cleave_wait(child);
+	return pid;
 
 fail:
 	last_errno = errno;
@@ -601,8 +605,6 @@ fail:
 		if (child_fd[i] != -1)
 			do_close(child_fd[i]);
 	}
-	if (waitfd != -1)
-		do_close(waitfd);
 	if (epollfd != -1)
 		do_close(epollfd);
 	errno = last_errno;
