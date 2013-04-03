@@ -96,30 +96,6 @@ int cleave_wait_fd(struct cleave_child *child);
 /* Return the pid of the child */
 pid_t cleave_pid(struct cleave_child *child);
 
-/* Execute a child process and block waiting for the child to complete.
- *
- * Each of stdin, stdout, stderr can be dup2'd to an existing file descriptor
- * (in which case it is the callers responsibility to ensure we don't deadlock),
- * or a callback parameterised by the file descriptor.
- *
- * rw: Provide a callback to read/write to the file descriptor. Keep reading
- *	writing until there's more data to write, or until read() returns zero.
- *	Return non-zero to close the file descriptor [do not under any
- *	circumstances call fclose() yourself].
- * iovec: Provide a single buffer for stdin and a single buffer for stdout/stderr.
- *	When the process has complete iov_len will be set to the number of bytes
- *	actually transferred.
- */
-struct cleave_exec_param {
-	int dup2_fd;
-	int (*rw)(int fd, void *priv);
-	struct iovec iov;
-};
-
-pid_t cleave_exec(struct cleave_handle *handle,
-		  char const **argv, struct cleave_exec_param param[3],
-		  void *priv);
-
 #ifdef __cplusplus
 }
 #endif
