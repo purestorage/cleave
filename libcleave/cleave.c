@@ -47,8 +47,8 @@
 #include <sys/resource.h>
 #include <sys/un.h>
 #include <sys/epoll.h>
+#include <sys/wait.h>
 #include <cleave.h>
-#include "syscall.h"
 
 /**
  * @child_pid: The pid of the cleaved process we started, or -1 if attached.
@@ -174,6 +174,63 @@ static char *encodeargs(char const **argv)
 	*p++ = '\0';
 
 	return buf;
+}
+
+static int do_close(int sock)
+{
+	int ret;
+again:
+	ret = close(sock);
+	if (ret == -1 && errno == EINTR)
+		goto again;
+	return ret;
+}
+
+static int do_connect(int sockfd, const struct sockaddr *addr,
+	       socklen_t addrlen)
+{
+	int ret;
+again:
+	ret = connect(sockfd, addr, addrlen);
+	if (ret == -1 && errno == EINTR)
+		goto again;
+	return ret;
+}
+
+static pid_t do_waitpid(pid_t pid, int *status, int options)
+{
+	pid_t ret;
+again:
+	ret = waitpid(pid, status, options);
+	if (ret == -1 && errno == EINTR)
+		goto again;
+	return ret;
+}
+
+static ssize_t do_write(int fd, const void * buf, size_t size)
+{
+	size_t pos;
+	int ret;
+
+	for (pos = 0; pos < size; ++pos) {
+		ret = write(fd, buf + pos, size - pos);
+		if (ret == -1 && errno != EINTR)
+			return -1;
+		else if (ret >= 0)
+			pos += ret;
+	}
+ 
+	return size;
+}
+
+static ssize_t do_read(int fd, void *buf, size_t size)
+{
+	int ret;
+again:
+	ret = read(fd, buf, size);
+	if (ret == -1 && errno == EINTR)
+		goto again;
+	return ret;
 }
 
 void cleave_set_logfn(void (*logfn)(char const *format, va_list args))
@@ -315,7 +372,7 @@ struct cleave_handle * cleave_attach(char const *path)
 	remote.sun_family = AF_UNIX;
 	strcpy(remote.sun_path, path);
 	len = strlen(remote.sun_path) + sizeof(remote.sun_family);
-	if (connect(sock, (struct sockaddr *)&remote, len) == -1) {
+	if (do_connect(sock, (struct sockaddr *)&remote, len) == -1) {
 		cleave_perror("connect");
 		goto exit_connect;
 	}
