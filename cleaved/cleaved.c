@@ -610,7 +610,7 @@ static int setup_event_fds()
 	unsigned                sig;
 	struct sigaction        sa;
 
-	epollfd = epoll_create(1);
+	epollfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epollfd < 0) {
 		cleaved_perror("epoll_create");
 		return -1;
