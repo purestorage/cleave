@@ -581,7 +581,7 @@ static int start_child(struct child_proc *child)
 	return 0;
 }
 
-/* A child process has finished. reap and notify */
+/* One or more child processes has finished. reap and notify */
 static int reap_child()
 {
 	struct child_proc *child;
@@ -589,10 +589,10 @@ static int reap_child()
 	int status;
 	pid_t pid;
 
+next_child:
 	pid = waitpid(-1, &status, WNOHANG);
-	if (pid < 0) {
-		cleaved_log_err("waitpid returned %d\n", pid);
-		return -1;
+	if (pid <= 0) {
+		return 0;
 	}
 
 	cleaved_log_dbg("pid %d completed status %d\n", pid, status);
@@ -602,10 +602,9 @@ static int reap_child()
 			/* notify the client */
 			do_write(child->exit_pipe, buf, sprintf(buf, "rc=%d\n", status));
 			destroy_child(child);
-			return 0;
+			goto next_child;
 		}
 	}
-
 	cleaved_log_err("unknown child pid %d completed\n", pid);
 	return -1;
 }
