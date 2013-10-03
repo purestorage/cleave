@@ -51,6 +51,10 @@ void cleave_set_logfn(void (*log)(char const *str));
  *
  * The passed error_fd is connected to stderr of the child process. Specify
  * -1 if you don't want to see any errors.
+ *
+ * By default we expect "cleave" to be in PATH. If "cleave" is installed
+ * outside of PATH, or installed with a different name, then you can override
+ * this behaviour by setting CLEAVE_CLEAVED_FILENAME environment variable
  */
 struct cleave_handle * cleave_create(int error_fd);
 

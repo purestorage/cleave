@@ -247,6 +247,7 @@ struct cleave_handle * cleave_create(int error_fd)
 	struct cleave_handle *handle;
 	char child_port[10];
 	pid_t pid;
+	char const *filename;
 
 	handle = malloc(sizeof(struct cleave_handle));
 	if (!handle) {
@@ -254,6 +255,10 @@ struct cleave_handle * cleave_create(int error_fd)
 		cleave_perror("malloc");
 		return NULL;
 	}
+
+	filename = getenv("CLEAVE_CLEAVED_FILENAME");
+	if (!filename)
+		filename = default_daemon_path;
 
 	/* all sockets/pipes are CLOEXEC in the parent */
 	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sock) == -1) {
@@ -308,7 +313,7 @@ struct cleave_handle * cleave_create(int error_fd)
 		}
 
 		/* geronimo */
-		execlp(daemon_path, daemon_path, "-n", child_port, NULL);
+		execlp(filename, filename, "-n", child_port, NULL);
 		cleave_perror("execlp");
 	child_error:
 		last_errno = errno;
