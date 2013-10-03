@@ -188,9 +188,9 @@ static void list_del(struct list_head *entry)
 }
 
 #define list_for_each_entry(pos, head, member)				\
-	for (pos = list_entry((head)->next, typeof(*pos), member);	\
+	for (pos = list_entry((head)->next, __typeof__(*pos), member);	\
 	     &pos->member != head;					\
-	     pos = list_entry(pos->member.next, typeof(*pos), member))
+	     pos = list_entry(pos->member.next, __typeof__(*pos), member))
 
 /********************* Operations **********************/
 

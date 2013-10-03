@@ -35,14 +35,14 @@
 #define CLEAVE_H
 
 #ifdef __cplusplus
-//extern "C" {
+extern "C" {
 #endif
 
 struct cleave_handle;
 struct cleave_child;
 
 /* Provide a callback for cleave logging */
-void cleave_set_logfn(void (*log)(char const *format, va_list args));
+void cleave_set_logfn(void (*log)(char const *str));
 
 /* Fork a new cleave daemon.
  *

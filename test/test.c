@@ -11,9 +11,9 @@
 #include <sys/uio.h>
 #include <cleave.h>
 
-static void logger(char const *format, va_list args)
+static void logger(char const *str)
 {
-	vfprintf(stderr, format, args);
+	puts(str);
 }
 
 int main()

@@ -71,19 +71,22 @@ struct cleave_child {
 	int wait_pipe;
 };
 
-static char * const daemon_path = "cleaved";
+static char * const default_daemon_path = "cleaved";
 
-static void cleave_log_null(char const *format __attribute__((unused)),
-			    va_list args __attribute__((unused))) { }
-static void (*cleave_logfn)(char const *format, va_list args) = cleave_log_null;
+static void cleave_log_null(char const *str __attribute__((unused))) { }
+static void (*cleave_logfn)(char const *str) = cleave_log_null;
 
 static void __attribute__((format (printf, 1, 2)))
 cleave_log(char const *format, ...)
 {
 	va_list args;
+	char *ptr;
 
 	va_start(args, format);
-	cleave_logfn(format, args);
+	if (vasprintf(&ptr, format, args) >= 0) {
+		cleave_logfn(ptr);
+		free(ptr);
+	}
 	va_end(args);
 }
 
@@ -219,7 +222,7 @@ static ssize_t do_write(int fd, const void * buf, size_t size)
 		else if (ret >= 0)
 			pos += ret;
 	}
- 
+
 	return size;
 }
 
@@ -233,7 +236,7 @@ again:
 	return ret;
 }
 
-void cleave_set_logfn(void (*logfn)(char const *format, va_list args))
+void cleave_set_logfn(void (*logfn)(char const *str))
 {
 	cleave_logfn = logfn;
 }
