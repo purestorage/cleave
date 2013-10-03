@@ -541,7 +541,7 @@ static int start_child(struct child_proc *child)
 
 		if (geteuid() == 0) {
 			/* Switch to the connecting credentials */
-			if (setuid(child->uc.uid) || setgid(child->uc.gid))
+			if (setgid(child->uc.gid) || setuid(child->uc.uid))
 				goto child_error;
 		}
 
