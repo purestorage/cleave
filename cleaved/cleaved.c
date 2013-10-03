@@ -66,8 +66,6 @@ struct child_proc {
 static int epollfd;
 static int sigfd;
 static int debug;
-static char *readbuf;
-static size_t readbuf_len;
 struct list_head children;
 static FILE *logfile;
 
@@ -288,7 +286,7 @@ static int setup_listen_socket(char *path)
 	struct sockaddr_un local;
 	int len;
 
-	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 	if (sock == -1) {
 		cleaved_perror("socket");
 		return -1;
@@ -401,13 +399,25 @@ static int decode_message(struct child_proc *child, char *buf)
 static struct child_proc *read_incoming_message(int sock)
 {
 	struct child_proc *child;
-	int fd[4], ret;
+	int fd[4], ret, readbuflen;
 	size_t nfd = 0, i;
 	char cmsgbuf[CMSG_SPACE(sizeof(fd))];
 	struct iovec data;
 	struct msghdr hdr;
 	struct cmsghdr *cmsg;
 	socklen_t optlen;
+	char *readbuf;
+
+	// The maximum size of message we can receive is given by the SO_SNDBUF * 2
+	optlen = sizeof(readbuflen);
+	if (getsockopt(sock, SOL_SOCKET, SO_SNDBUF, &readbuflen, &optlen) == -1) {
+		perror("getsockopt");
+		return NULL;
+	}
+	readbuflen <<= 1;
+	readbuf = malloc(readbuflen);
+	if (!readbuf)
+		out_of_memory();
 
 	child = malloc(sizeof(struct child_proc));
 	if (!child)
@@ -415,7 +425,7 @@ static struct child_proc *read_incoming_message(int sock)
 	memset(child, 0, sizeof(*child));
 
 	data.iov_base = readbuf;
-	data.iov_len = readbuf_len;
+	data.iov_len = readbuflen;
 
 	memset(&hdr, 0, sizeof(hdr));
 	hdr.msg_iov = &data;
@@ -468,6 +478,7 @@ close_fds:
 		}
 		cmsg = CMSG_NXTHDR(&hdr, cmsg);
 	}
+	free(readbuf);
 	return child;
 
 exit_recvmsg:
@@ -684,19 +695,9 @@ int main(int argc, char *argv[])
 
 	reopen_logfile(logfile_name);
 
-	/* read_incoming_message receives a message containing an array of
-	 * urlencoded arguments:
-	 *   arg=%5D\n
-	 * The worst case size is one url encoded byte per argument
-	 */
-	readbuf_len = sysconf(_SC_ARG_MAX) * 8 + 20;
-	readbuf = malloc(readbuf_len);
-	if (!readbuf)
-		out_of_memory();
-
 	if (setup_event_fds())
 		return 2;
-	
+
         if (socket_number != -1) {
 		if (do_fcntl(socket_number, F_GETFD, F_SETFD, FD_CLOEXEC, 0) ||
 		    do_fcntl(socket_number, F_GETFL, F_SETFL, O_NONBLOCK, 0))

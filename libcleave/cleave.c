@@ -256,7 +256,7 @@ struct cleave_handle * cleave_create(int error_fd)
 	}
 
 	/* all sockets/pipes are CLOEXEC in the parent */
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sock) == -1) {
+	if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sock) == -1) {
 		cleave_perror("socketpair");
 		goto exit_socket;
 	}
@@ -366,7 +366,7 @@ struct cleave_handle * cleave_attach(char const *path)
 		return NULL;
 	}
 
-	sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	sock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
 	if (sock == -1) {
 		cleave_perror("socket");
 		goto exit_socket;
@@ -538,7 +538,7 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 	cmsg->cmsg_type = SCM_RIGHTS;
 	memcpy(CMSG_DATA(cmsg), fd, sizeof(fd));
 
-	ret = sendmsg(handle->sock, &hdr, 0);
+	ret = sendmsg(handle->sock, &hdr, MSG_EOR);
 	if (ret == -1) {
 		cleave_perror("sendmsg");
 		goto exit_sendmsg;
