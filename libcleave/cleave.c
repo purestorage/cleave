@@ -316,6 +316,7 @@ struct cleave_handle * cleave_create(int error_fd)
 		execlp(filename, filename, "-n", child_port, NULL);
 		cleave_perror("execlp");
 	child_error:
+		/* Send errno 'raw' (unencoded) over the pipe */
 		last_errno = errno;
 		do_write(err_pipe[1], &last_errno, sizeof(last_errno));
 		_exit(127);
@@ -333,6 +334,7 @@ struct cleave_handle * cleave_create(int error_fd)
 			cleave_perror("close");
 		free(handle);
 		if (ret == sizeof(last_errno))
+			/* We received an error from the child */
 			errno = last_errno;
 		return NULL;
 	}

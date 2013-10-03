@@ -73,7 +73,14 @@ void cleave_destroy(struct cleave_handle *handle);
  * The fd array is an array of three pipe fd's - stdin, stdout, stderr. Any
  * one of these fds can be -1 in which case the fd will be duped to /dev/null.
  *
+ * This function is thread-safe. cleave_child() can be called concurrently
+ * on the same cleave_handle. This function will block if the socket buffer
+ * to cleaved fills, which realistically is only possible if you're executing
+ * a very large command line or cleaved is somehow broken.
+ *
  * The returned handle *must* be freed by calling cleave_wait().
+ *
+ * NB: There is currently no way to pass environment variables to the child.
  */
 struct cleave_child * cleave_child(struct cleave_handle *handle,
 				   char const **argv, int fd[3]);
@@ -83,17 +90,22 @@ struct cleave_child * cleave_child(struct cleave_handle *handle,
  * This call will deadlock if any of stdin, stdout, stderr fill and
  * aren't drained by the client.
  *
+ * Since cleave_wait() frees the cleave_child structure, this function
+ * can only be called once.
+ *
  * Returns the return code of the process, or -1.
  * The cleave_child is always invalid after this call, even if -1 is returned.
  */
 pid_t cleave_wait(struct cleave_child *child);
 
 /* Return the file descriptor that cleave_wait() uses to determine when the
- * child processes has exited. This file descriptor is one end of a pipe.
+ * child processes has exited. This file descriptor is one end of a pipe,
+ * and the pipe is written and closed when the process completes.
  *
- * Use this file descriptor with select/poll/epoll to determine when to
- * call cleave_wait(), which will read from the pipe. Do not read/write from
- * this file descriptor.
+ * Use cleave_wait_fd() if you want to call cleave_wait() without blocking.
+ * Use select/poll/epoll to wait for on this fd, then call cleave_wait().
+ * Note that if you're using epoll then use EPOLLHUP to absolutely guarantee
+ * to avoid blocking.
  */
 int cleave_wait_fd(struct cleave_child *child);
 
