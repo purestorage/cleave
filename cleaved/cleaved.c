@@ -510,6 +510,7 @@ static void destroy_child(struct child_proc *child)
 static int start_child(struct child_proc *child)
 {
 	int err_pipe[2], ret;
+	sigset_t sigmask;
 	pid_t pid;
 	char buf[16];
 
@@ -532,6 +533,11 @@ static int start_child(struct child_proc *child)
 		close(child->fd[0]);
 		close(child->fd[1]);
 		close(child->fd[2]);
+
+                /* Unblock signals blocked in parent process */
+                sigfillset(&sigmask);
+                if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
+                        goto child_error;
 
 		if (geteuid() == 0) {
 			/* Switch to the connecting credentials */
@@ -601,7 +607,8 @@ static int reap_child()
 
 static int setup_event_fds()
 {
-	sigset_t		sigmask;
+	unsigned                sig;
+	struct sigaction        sa;
 
 	epollfd = epoll_create(1);
 	if (epollfd < 0) {
@@ -609,16 +616,23 @@ static int setup_event_fds()
 		return -1;
 	}
 
-	sigemptyset(&sigmask);
-	sigaddset(&sigmask, SIGHUP);
-	sigaddset(&sigmask, SIGCHLD);
+	/* Reset all signal handlers to default */
+	sa.sa_flags = 0;
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	for (sig = 0; sig < NSIG; sig++)
+		sigaction(sig, &sa, NULL);
 
-	if (sigprocmask(SIG_BLOCK, &sigmask, NULL) < 0) {
+	/* Block the signals used with signalfd */
+	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGHUP);
+	sigaddset(&sa.sa_mask, SIGCHLD);
+	if (sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL) < 0) {
 		cleaved_perror("sigprocmask");
 		return -1;
 	}
 
-	sigfd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+	sigfd = signalfd(-1, &sa.sa_mask, SFD_NONBLOCK | SFD_CLOEXEC);
 	if (sigfd < 0) {
 		cleaved_perror("signalfd");
 		return -1;
