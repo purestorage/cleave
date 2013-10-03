@@ -271,8 +271,6 @@ static int urldecode(char const *str, char *ret)
 				*pret++ = from_hex(pstr[1]) << 4 | from_hex(pstr[2]);
 				pstr += 2;
 			}
-		} else if (*pstr == '+') {
-			*pret++ = ' ';
 		} else {
 			*pret++ = *pstr;
 		}
@@ -340,7 +338,7 @@ static int accept_listen_socket(int socket)
 }
 
 /* Message consists of
- *   exec=urlencode(argv[0]),urlencode(argv[1]),urlencode(argv[2])\n
+ *   exec=urlencode(argv[0])&arg=urlencode(argv[1])&arg=urlencode(argv[2])\n
  */
 static int decode_message(struct child_proc *child, char *buf)
 {
@@ -355,11 +353,11 @@ static int decode_message(struct child_proc *child, char *buf)
 
 	/* Count the number of arguments in first line */
 	for (pbuf = buf, argcount = 0; *pbuf; pbuf++) {
-		if (*pbuf == ',')
+		if (!strncmp(pbuf, "&a=", 3) || *pbuf == '\n') {
 			++argcount;
-		else if (*pbuf == '\n') {
-			++argcount;
-			break;
+			if (*pbuf == '\n')
+				break;
+			pbuf += 2;
 		}
 	}
 	size = pbuf - buf;
@@ -368,21 +366,26 @@ static int decode_message(struct child_proc *child, char *buf)
 	if (!argv)
 		out_of_memory();
 
-	/* Allocate a single buffer for all of trhe decoded strings, which
+	/* Allocate a single buffer for all of the decoded strings, which
 	 * is guaranteed to be less than the number of bytes above */
 	argbuf = malloc(size);
 	if (!argbuf)
 		out_of_memory();
 
 	/* Start decoding the mesage */
-	for (pbuf = buf, argcount = 0; *pbuf; pbuf++) {
-		if (*pbuf == ',' || *pbuf == '\n') {
+	pbuf = buf;
+	argcount = 0;
+	while (*pbuf) {
+		if (!strncmp(pbuf, "&a=", 3) || *pbuf == '\n') {
 			*pbuf = '\0';
 			argv[argcount++] = argbuf;
 			/* Include the NUL between each decoded argument */
 			argbuf += urldecode(buf, argbuf) + 1;
-			buf = pbuf + 1;
-		}
+			if (*pbuf == '\n')
+				break;
+			pbuf = buf = pbuf + 3;
+		} else
+			pbuf++;
 	}
 	argv[argcount] = NULL;
 

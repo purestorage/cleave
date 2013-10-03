@@ -127,8 +127,6 @@ static int urlencode(char const *str, char *ret)
 	for (pstr = str; *pstr; ++pstr) {
 		if (isalnum(*pstr) || *pstr == '-' || *pstr == '_' || *pstr == '.' || *pstr == '~')
 			*pret++ = *pstr;
-		else if (*pstr == ' ')
-			*pret++ = '+';
 		else {
 			*pret++ = '%';
 			*pret++ = to_hex(*pstr >> 4);
@@ -155,7 +153,7 @@ static char *encodeargs(char const **argv)
 
 	len = 7;
 	for (arg = argv; *arg; ++arg)
-		len += 1 + urlencode_len(strlen(*arg));
+		len += 4 + urlencode_len(strlen(*arg));
 	buf = malloc(len);
 	if (!buf) {
 		errno = ENOMEM;
@@ -168,7 +166,8 @@ static char *encodeargs(char const **argv)
 	for (arg = argv; *arg; ++arg) {
 		p += urlencode(*arg, p);
 		if (arg[1]) {
-			*p++ = ',';
+			memcpy(p, "&a=", 3);
+			p += 3;
 		}
 	}
 	*p++ = '\n';
@@ -424,6 +423,8 @@ static int child_readmsg(struct cleave_child *child)
 
 	newbuf = realloc(child->buf, child->buflen + ret);
 	if (!newbuf) {
+		/* The caller will call cleave_destroy()
+		 * so we don't need to free child->buf */
 		errno = ENOMEM;
 		cleave_perror("malloc");
 		return -1;
@@ -434,8 +435,15 @@ static int child_readmsg(struct cleave_child *child)
 	return 0;
 }
 
-/* Search for the given field in the child msg buffer. Returns true if
- * the field was present */
+/* Search for the given field in the child msg buffer. The buffer
+ * will return fields like this:
+ *
+ * pid=<pid>\n
+ * errno=<errno>\n
+ * rc=<rc>\n
+ *
+ * Returns true if the field was present
+ */
 static bool child_getfield(struct cleave_child *child, char *field, int *value)
 {
 	int i, fieldlen, sol;
@@ -538,9 +546,9 @@ struct cleave_child *cleave_child(struct cleave_handle *handle, char const **arg
 	exit_pipe[1] = -1;
 	child->wait_pipe = exit_pipe[0];
 
-	/* Block until we receive pid= or errno= so we can return a good error code.
-	 * This also allows the client to use select/poll/epoll via cleave_wait_fd(),
-	 * without getting confused by additional fields. */
+	/* Block until we receive pid= or errno= so we can return a good error
+	 * code. This also allows the client to use select/poll/epoll on
+	 * cleave_wait_fd() to avoid blocking in cleave_wait(). */
 	while (true) {
 		if (child_getfield(child, "errno", &child_errno))
 			goto exit_last;
