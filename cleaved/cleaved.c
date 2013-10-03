@@ -520,7 +520,12 @@ static int start_child(struct child_proc *child)
 	}
 
 	pid = fork();
-	if (!pid) {
+	if (pid == -1) {
+		perror("fork");
+		if (close(err_pipe[0]) || close(err_pipe[1]))
+			perror("close");
+		return -1;
+	} else if (pid == 0) {
 		/* child */
 		if (close(err_pipe[0]) == -1)
 			goto child_error;

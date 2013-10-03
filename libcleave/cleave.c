@@ -273,7 +273,10 @@ struct cleave_handle * cleave_create(int error_fd)
 	}
 
 	pid = fork();
-	if (!pid) {
+	if (pid == -1) {
+		cleave_perror("fork");
+		goto exit_fork;
+	} else if (pid == 0) {
 		/* child */
 		struct rlimit rlim;
 
@@ -333,6 +336,7 @@ struct cleave_handle * cleave_create(int error_fd)
 		if (do_close(err_pipe[0]) || do_close(sock[0]))
 			cleave_perror("close");
 		free(handle);
+
 		if (ret == sizeof(last_errno))
 			/* We received an error from the child */
 			errno = last_errno;
@@ -346,6 +350,9 @@ struct cleave_handle * cleave_create(int error_fd)
 
 	return handle;
 
+exit_fork:
+	if (do_close(err_pipe[0]) || do_close(err_pipe[1]))
+		cleave_perror("close");
 exit_pipe:
 	if (do_close(sock[0]) || do_close(sock[1]))
 		cleave_perror("close");
