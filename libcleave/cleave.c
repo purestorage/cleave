@@ -409,18 +409,26 @@ exit_socket:
 	return NULL;
 }
 
-void cleave_destroy(struct cleave_handle *handle)
+int cleave_connect_fd(struct cleave_handle *handle)
 {
+	return handle->sock;
+}
+
+int cleave_destroy(struct cleave_handle *handle)
+{
+	int status = 0;
+
 	if (do_close(handle->sock))
 		cleave_perror("close");
 
 	if (handle->child_pid) {
-		int status;
 		if (do_waitpid(handle->child_pid, &status, 0) == -1)
 			cleave_perror("waitpid");
 	}
 
 	free(handle);
+
+	return status;
 }
 
 /* Read more data from the (blocking) child exit_pipe */
@@ -620,9 +628,9 @@ int cleave_pid(struct cleave_child *child)
 	}
 }
 
-pid_t cleave_wait(struct cleave_child *child)
+int cleave_wait(struct cleave_child *child)
 {
-	pid_t ret;
+	int ret;
 
 	while (true) {
 		if (child_getfield(child, "rc", &ret))

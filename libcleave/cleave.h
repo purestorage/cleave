@@ -60,13 +60,24 @@ struct cleave_handle * cleave_create(int error_fd);
 
 /* Attach to a running cleave daemon at the given socket
  *
- * This handle must be destroyed by calling cleave_destroy(). The ademon will
+ * This handle must be destroyed by calling cleave_destroy(). The daemon will
  * continue to run after cleave_destroy().
  */
 struct cleave_handle * cleave_attach(char const *socket);
 
-/* Detach from the running cleave daemon. */
-void cleave_destroy(struct cleave_handle *handle);
+/* Return the communication socket used to connect with the daemon.
+ *
+ * This is useful if you want to use poll/epoll with POLLRDHUP to check
+ * when the process dies
+ */
+int cleave_connect_fd(struct cleave_handle *);
+
+/* Detach from the running cleave daemon.
+ *
+ * If the process was started by cleave_create() then it will die when the connection
+ * drops. Returns the return code from cleaved.
+ */
+int cleave_destroy(struct cleave_handle *handle);
 
 /* Execute a child process
  *
@@ -96,7 +107,7 @@ struct cleave_child * cleave_child(struct cleave_handle *handle,
  * Returns the return code of the process, or -1.
  * The cleave_child is always invalid after this call, even if -1 is returned.
  */
-pid_t cleave_wait(struct cleave_child *child);
+int cleave_wait(struct cleave_child *child);
 
 /* Return the file descriptor that cleave_wait() uses to determine when the
  * child processes has exited. This file descriptor is one end of a pipe,

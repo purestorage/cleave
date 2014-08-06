@@ -15,4 +15,10 @@ clean:
 	find . -name *.o -exec rm {} \;
 	rm -f cleaved/cleaved
 
-.PHONY: clean test
+runtests: test/test cleaved/cleaved
+	CLEAVE_CLEAVED_FILENAME=cleaved/cleaved LD_LIBRARY_PATH=libcleave test/test
+
+runtests_gdb: test/test cleaved/cleaved
+	CLEAVE_CLEAVED_FILENAME=cleaved/cleaved LD_LIBRARY_PATH=libcleave gdb test/test
+
+.PHONY: clean test runtests runtests_gdb
