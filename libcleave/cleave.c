@@ -294,9 +294,11 @@ struct cleave_handle * cleave_create(int error_fd)
 			cleave_perror("open");
 			goto child_error;
 		}
-		if (dup2(nullfd, 0) == -1 ||
+
+		/* consume error_fd before dup2'ing stdout */
+		if (dup2(error_fd != -1 ? error_fd : nullfd, 2) == -1 ||
 		    dup2(nullfd, 1) == -1 ||
-		    dup2(error_fd != -1 ? error_fd : nullfd, 2) == -1) {
+		    dup2(nullfd, 0) == -1) {
 			cleave_perror("dup2");
 			goto child_error;
 		}
