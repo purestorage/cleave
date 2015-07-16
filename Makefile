@@ -1,4 +1,4 @@
-CFLAGS := -O2 -g -Werror -Wall -Wextra -std=gnu99 -ggdb
+CFLAGS := -Og -g -Werror -Wall -Wextra -std=gnu99 -ggdb
 
 default: cleaved/cleaved libcleave/libcleave.so test/test
 
@@ -13,7 +13,7 @@ test/test: test/test.c libcleave/libcleave.so
 
 clean:
 	find . -name *.o -exec rm {} \;
-	rm -f cleaved/cleaved
+	rm -f cleaved/cleaved test/test libcleave/libcleave.so
 
 runtests: test/test cleaved/cleaved
 	CLEAVE_CLEAVED_FILENAME=cleaved/cleaved LD_LIBRARY_PATH=libcleave test/test

@@ -14,99 +14,125 @@
 #include <sys/uio.h>
 #include <cleave.h>
 
+static char * const socket = "/tmp/cleaved.sock";
+
 static void logger(char const *str)
 {
 	puts(str);
 }
 
-int main()
+/* test: cleave_create */
+static struct cleave_handle * test1(void)
 {
 	struct cleave_handle *handle;
-	struct cleave_child *child;
-	struct pollfd pfd;
-	int i, status;
 
-	cleave_set_logfn(logger);
-
-	/* Close all file descriptors for test 9 */
-	for (i = 3; i < 1024; i++)
-		close(i);
-
-	/* Test 1: cleave_create */
 	printf("Test 1\n");
 	handle = cleave_create(2);
 	assert(handle);
 
-	/* Test 2: print to stdout via cleave_child/cleave_wait */
+	return handle;
+}
+
+/* test: print to stdout via cleave_child/cleave_wait */
+static void test2(struct cleave_handle *handle)
+{
+	struct cleave_child *child;
+	char const *argv[] = {"/bin/echo", "test", NULL};
+	int fd[] = {0, 1, 2};
+	pid_t pid;
+
 	printf("Test 2\n");
-	{
-		char const *argv[] = {"/bin/echo", "test", NULL};
-		int fd[] = {0, 1, 2};
-		pid_t pid;
 
-		child = cleave_child(handle, argv, fd);
-		assert(child);
-		pid = cleave_wait(child);
-		assert(pid == 0);
-	}
+	child = cleave_child(handle, argv, fd);
+	assert(child);
+	pid = cleave_wait(child);
+	assert(pid == 0);
+}
 
-	{
-		/* Test 3: Start cleaved and attach to it */
-		char * const socket = "/tmp/cleaved.sock";
-		char const *argv[] = {"cleaved/cleaved", "-l", socket, "-d", NULL};
-		int fd[] = {0, 1, 2};
-		pid_t pid;
-		struct cleave_handle *handle_inner;
+/* test: Start cleaved and attach to it */
+static struct cleave_child *test3(struct cleave_handle *handle)
+{
+	char const *argv[] = {"cleaved/cleaved", "-l", socket, "-d", NULL};
+	int fd[] = {0, 1, 2};
+	struct cleave_child *child;
+	struct cleave_handle *handle_inner;
+	int status;
 
-		printf("Test 3\n");
+	printf("Test 3\n");
 
-		child = cleave_child(handle, argv, fd);
-		assert(child);
+	child = cleave_child(handle, argv, fd);
+	assert(child);
 
-		sleep(1);
+	sleep(1);
 
-		handle_inner = cleave_attach(socket);
-		assert(handle_inner);
+	handle_inner = cleave_attach(socket);
+	assert(handle_inner);
 
-		status = cleave_destroy(handle_inner);
-		assert(WIFEXITED(status));
-		assert(WEXITSTATUS(status) == 0);
+	status = cleave_destroy(handle_inner);
+	assert(WIFEXITED(status));
+	assert(WEXITSTATUS(status) == 0);
+	return child;
+}
 
-		/* Test 7: can we attach again */
-		printf("Test 7\n");
+/* test: can we attach again */
+static struct cleave_handle *test4(void)
+{
+	struct cleave_handle *handle;
 
-		handle_inner = cleave_attach(socket);
-		assert(handle_inner);
+	printf("Test 4\n");
 
-		/* Test 8: Handle an exec failure */
-		printf("Test 8\n");
-		{
-			char const *argv[] = {"does_not_exist", NULL};
-			int fd[] = {0, 1, 2};
-			struct cleave_child *child2;
+	handle = cleave_attach(socket);
+	assert(handle);
 
-			child2 = cleave_child(handle_inner, argv, fd);
-			assert(child2 == NULL);
-			assert(errno == ENOENT);
-		}
+	return handle;
+}
 
-		status = cleave_destroy(handle_inner);
-		assert(WIFEXITED(status));
-		assert(WEXITSTATUS(status) == 0);
+/* test: exec failure */
+static void test5(struct cleave_handle *handle)
+{
+	char const *argv[] = {"does_not_exist", NULL};
+	int fd[] = {0, 1, 2};
+	struct cleave_child *child;
 
-		/* Test 9: kill the child and verify the signal is correct */
-		printf("Test 9\n");
-		pid = cleave_pid(child);
-		assert(pid > 0);
-		kill(pid, SIGFPE);
+	printf("Test 5\n");
 
-		status = cleave_wait(child);
-		assert(WIFSIGNALED(status));
-		assert(WTERMSIG(status) == SIGFPE);
-	}
+	child = cleave_child(handle, argv, fd);
+	assert(child == NULL);
+	assert(errno == ENOENT);
+}
 
-	/* Test 10: Check that we can wait for cleave to be killed */
-	printf("Test 10\n");
+/* test: kill child and check return code */
+static void test6(struct cleave_child *child, struct cleave_handle *child2)
+{
+	int signal;
+	int status;
+	int pid;
+
+	printf("Test 6\n");
+
+	status = cleave_destroy(child2);
+	assert(WIFEXITED(status));
+	assert(WEXITSTATUS(status) == 0);
+
+	pid = cleave_pid(child);
+	assert(pid > 0);
+	kill(pid, SIGFPE);
+
+	status = cleave_wait(child);
+	assert(WIFSIGNALED(status));
+	signal = WTERMSIG(status);
+	assert(signal == SIGFPE);
+}
+
+/* test: check that we can wait for cleave to be killed */
+static void test7(struct cleave_handle *handle)
+{
+	struct pollfd pfd;
+	int signal;
+	int status;
+
+	printf("Test 7\n");
+
 	pfd.fd = cleave_connect_fd(handle);
 	pfd.events = POLLRDHUP | POLLHUP;
 	pfd.revents = 0;
@@ -121,8 +147,30 @@ int main()
 
 	status = cleave_destroy(handle);
 	assert(WIFSIGNALED(status));
-	int signal = WTERMSIG(status);
+	signal = WTERMSIG(status);
 	assert(signal == SIGTERM);
+}
+
+int main()
+{
+	struct cleave_handle *handle;
+	struct cleave_child *child;
+	struct cleave_handle *child2;
+	int i;
+
+	cleave_set_logfn(logger);
+
+	/* Close all file descriptors for test 9 */
+	for (i = 3; i < 1024; i++)
+		close(i);
+
+	handle = test1();
+	test2(handle);
+	child = test3(handle);
+	child2 = test4();
+	test5(child2);
+	test6(child, child2);
+	test7(handle);
 
 	/* Verify no fd leaks */
 	i = open("/dev/null", O_RDONLY);
