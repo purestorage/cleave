@@ -132,7 +132,7 @@ static int urlencode(char const *str, char *ret)
 			*pret++ = *pstr;
 		else {
 			*pret++ = '%';
-			*pret++ = to_hex(*pstr >> 4);
+			*pret++ = to_hex(((unsigned char)*pstr) >> 4);
 			*pret++ = to_hex(*pstr & 15);
 		}
 	}
