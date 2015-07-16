@@ -340,8 +340,8 @@ static int accept_listen_socket(int socket)
  */
 static int decode_message(struct child_proc *child, char *buf)
 {
-	int argcount, size;
-	char **argv, *pbuf, *argbuf;
+	int argcount, bufsize;
+	char **argv, *pbuf, *argbuf, *bufend;
 
 	if (strncmp(buf, "exec=", 5)) {
 		cleaved_log_dbg("unknown message type\n");
@@ -358,7 +358,8 @@ static int decode_message(struct child_proc *child, char *buf)
 			pbuf += 2;
 		}
 	}
-	size = pbuf - buf;
+	bufsize = pbuf - buf;
+	bufend = pbuf;
 
 	argv = malloc(sizeof(char *) * (argcount + 1));
 	if (!argv)
@@ -366,7 +367,7 @@ static int decode_message(struct child_proc *child, char *buf)
 
 	/* Allocate a single buffer for all of the decoded strings, which
 	 * is guaranteed to be less than the number of bytes above */
-	argbuf = malloc(size);
+	argbuf = malloc(bufsize);
 	if (!argbuf)
 		out_of_memory();
 
@@ -374,19 +375,21 @@ static int decode_message(struct child_proc *child, char *buf)
 	pbuf = buf;
 	argcount = 0;
 	while (*pbuf) {
+		assert(pbuf <= bufend);
 		if (!strncmp(pbuf, "&a=", 3) || *pbuf == '\n') {
+			int terminal = (*pbuf == '\n');
+			/* Split the incoming argument */
 			*pbuf = '\0';
+			/* Decode the argument (and NUL) into argbuf. */
 			argv[argcount++] = argbuf;
-			/* Include the NUL between each decoded argument */
 			argbuf += urldecode(buf, argbuf) + 1;
-			if (*pbuf == '\n')
+			if (terminal)
 				break;
 			pbuf = buf = pbuf + 3;
 		} else
 			pbuf++;
 	}
 	argv[argcount] = NULL;
-
 	child->argv = argv;
 	return 0;
 }
