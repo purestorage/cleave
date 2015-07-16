@@ -567,19 +567,22 @@ static int start_child(struct child_proc *child)
 	child->fd[0] = child->fd[1] = child->fd[2] = -1;
 	child->pid = pid;
 
-	/* send the pid= or the errno= back to the client */
+	/* send the pid= or the errno= back to the client. Add the child to
+	 * the client list even it failed to start because we will need
+	 * to reap the child process anyway. */
 	ret = read(err_pipe[0], buf, sizeof(buf));
+	close(err_pipe[0]);
+
 	if (ret) {
 		do_write(child->exit_pipe, buf, ret);
-		close(err_pipe[0]);
-		return -1;
+		buf[ret] = '\0';
+		cleaved_log_msg("failed to start %s %s\n", child->argv[0], buf);
+	} else {
+		do_write(child->exit_pipe, buf, sprintf(buf, "pid=%d\n", pid));
+		cleaved_log_msg("started %s pid %d\n", child->argv[0], pid);
 	}
 
-	close(err_pipe[0]);
-	do_write(child->exit_pipe, buf, sprintf(buf, "pid=%d\n", pid));
 	list_add(&child->list, &children);
-
-	cleaved_log_msg("started %s pid %d\n", child->argv[0], pid);
 
 	return 0;
 }
@@ -634,6 +637,7 @@ static int setup_event_fds()
 	sigemptyset(&sa.sa_mask);
 	sigaddset(&sa.sa_mask, SIGHUP);
 	sigaddset(&sa.sa_mask, SIGCHLD);
+	sigaddset(&sa.sa_mask, SIGPIPE);
 	if (sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL) < 0) {
 		cleaved_perror("sigprocmask");
 		return -1;
@@ -768,7 +772,7 @@ int main(int argc, char *argv[])
 				}
 			}
 		} else {
-			if (ev.events & (EPOLLERR  | EPOLLHUP)) {
+			if (ev.events & (EPOLLERR | EPOLLHUP)) {
 				cleaved_log_dbg("socket %d: closed\n", ev.data.fd);
 				close(ev.data.fd);
 				if (ev.data.fd == socket_number) {

@@ -169,6 +169,7 @@ int main()
 	child = test3(handle);
 	child2 = test4();
 	test5(child2);
+	test5(handle);
 	test6(child, child2);
 	test7(handle);
 
