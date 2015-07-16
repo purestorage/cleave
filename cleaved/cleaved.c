@@ -542,10 +542,10 @@ static int start_child(struct child_proc *child)
 		close(child->fd[1]);
 		close(child->fd[2]);
 
-                /* Unblock signals blocked in parent process */
-                sigfillset(&sigmask);
-                if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
-                        goto child_error;
+		/* Unblock signals blocked in parent process */
+		sigfillset(&sigmask);
+		if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
+			goto child_error;
 
 		if (geteuid() == 0) {
 			/* Switch to the connecting credentials */
@@ -614,8 +614,8 @@ next_child:
 
 static int setup_event_fds()
 {
-	unsigned                sig;
-	struct sigaction        sa;
+	unsigned		sig;
+	struct sigaction	sa;
 
 	epollfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epollfd < 0) {
@@ -653,15 +653,15 @@ static int setup_event_fds()
 
 static void usage(char const *prog)
 {
-        printf("Usage:\n");
-        printf("  %s         fork/exec daemon\n", prog);
-        printf("\n");
-        printf("Options:\n");
-        printf("  -l, --listen=<path>     open a unix domain socket at the given path\n");
-        printf("  -n, --number=<fd>       start listening on the given socket number\n");
+	printf("Usage:\n");
+	printf("  %s	 fork/exec daemon\n", prog);
+	printf("\n");
+	printf("Options:\n");
+	printf("  -l, --listen=<path>     open a unix domain socket at the given path\n");
+	printf("  -n, --number=<fd>       start listening on the given socket number\n");
 	printf("  -o, --logfile=<path>    path for logging. SIGHUP is supported\n");
-	printf("  -d, --debug             enable debug logging\n");
-        printf("  -h, --help              print this usage information and exit\n");
+	printf("  -d, --debug	     enable debug logging\n");
+	printf("  -h, --help	      print this usage information and exit\n");
 	printf("\n");
 }
 
@@ -681,8 +681,8 @@ int main(int argc, char *argv[])
 			{ .name = "listen",     .has_arg = required_argument,   .val = 'l' },
 			{ .name = "number",     .has_arg = required_argument,   .val = 'n' },
 			{ .name = "logfile",    .has_arg = required_argument,   .val = 'o' },
-			{ .name = "debug",      .has_arg = no_argument,         .val = 'd' },
-			{ .name = "help",       .has_arg = no_argument,         .val = 'h' },
+			{ .name = "debug",      .has_arg = no_argument,	 .val = 'd' },
+			{ .name = "help",       .has_arg = no_argument,	 .val = 'h' },
 			{ 0 },
 		};
 
@@ -693,10 +693,10 @@ int main(int argc, char *argv[])
 		switch (c) {
 		case 'l':
 			listen_path = strdupa(optarg);
-                        break;
+			break;
 		case 'n':
 			socket_number = atoi(optarg);
-                        break;
+			break;
 		case 'o':
 			logfile_name = strdupa(optarg);
 			break;
@@ -719,40 +719,40 @@ int main(int argc, char *argv[])
 	if (setup_event_fds())
 		return 2;
 
-        if (socket_number != -1) {
+	if (socket_number != -1) {
 		if (do_fcntl(socket_number, F_GETFD, F_SETFD, FD_CLOEXEC, 0) ||
 		    do_fcntl(socket_number, F_GETFL, F_SETFL, O_NONBLOCK, 0))
 			return 3;
 		if (epoll_op(EPOLL_CTL_ADD, EPOLLIN, socket_number))
 			return 4;
-        } else if (listen_path) {
-                listen_socket = setup_listen_socket(listen_path);
-                if (listen_socket < 0)
-                        return 5;
+	} else if (listen_path) {
+		listen_socket = setup_listen_socket(listen_path);
+		if (listen_socket < 0)
+			return 5;
 		if (epoll_op(EPOLL_CTL_ADD, EPOLLIN, listen_socket))
 			return 6;
 	}
 
 	list_init(&children);
 
-        /* Main event loop */
+	/* Main event loop */
 
-        while (1) {
-                ret = epoll_wait(epollfd, &ev, 1, -1);
-                if (ret < 0) {
-                        if (errno == EINTR)
-                                continue;
-                        cleaved_perror("epoll_wait");
-                        return 7;
-                }
-                if (ret == 0)
-                        continue;
+	while (1) {
+		ret = epoll_wait(epollfd, &ev, 1, -1);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			cleaved_perror("epoll_wait");
+			return 7;
+		}
+		if (ret == 0)
+			continue;
 
-                if (ev.data.fd == listen_socket) {
-                        int new_socket = accept_listen_socket(listen_socket);
-                        if (new_socket < 0)
+		if (ev.data.fd == listen_socket) {
+			int new_socket = accept_listen_socket(listen_socket);
+			if (new_socket < 0)
 				return 8;
-                } else if (ev.data.fd == sigfd) {
+		} else if (ev.data.fd == sigfd) {
 			struct signalfd_siginfo	si;
 
 			if (read(sigfd, &si, sizeof si) < (int)sizeof(si)) {
@@ -788,5 +788,5 @@ int main(int argc, char *argv[])
 		}
 	}
 
-        return 0;
+	return 0;
 }
