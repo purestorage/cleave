@@ -33,6 +33,7 @@
  */
 #define _GNU_SOURCE
 #include <getopt.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,8 +148,6 @@ reopen_logfile(char const *name)
 }
 
 /********************* List handling *******************/
-
-#define offsetof(_type, _member) ((size_t) &((_type *)0)->_member)
 
 #define list_entry(_ptr, _type, _member)			\
 	((_type *)((char *)(_ptr) - offsetof(_type, _member)))
